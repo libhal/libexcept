@@ -24,13 +24,8 @@ class TestPackageConan(ConanFile):
     generators = "VirtualRunEnv", "CMakeDeps", "CMakeToolchain"
 
     def build_requirements(self):
-<<<<<<<< HEAD:v1/test_package/conanfile.py
-        self.tool_requires("ninja/[^1.13.1]")
-        self.tool_requires("cmake/[^4.0.0]")
-========
         self.tool_requires("cmake/[^4.0.0]")
         self.tool_requires("ninja/[^1.3.0]")
->>>>>>>> f7f80c8 (:rocket: Add LLVM support):v2/test_package/conanfile.py
 
     def requirements(self):
         self.requires(self.tested_reference_str)
