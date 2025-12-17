@@ -1,0 +1,21 @@
+{
+  "reg": [
+    {
+      "bits": 22,
+      "name": "starting entry number",
+      "type": 5
+    },
+    {
+      "bits": 10,
+      "name": "entry count",
+      "type": 6
+    }
+  ],
+  "config": {
+    "fontsize": 14,
+    "bits": 32,
+    "hflip": true,
+    "lanes": 1,
+    "compact": true
+  }
+}
