@@ -23,7 +23,7 @@
 
 #include <libhal-util/bit.hpp>
 
-namespace ke {
+namespace except {
 using exception_ptr = void*;
 using destructor_t = void(void*);
 
@@ -423,14 +423,14 @@ struct [[gnu::packed]] lu_t
   std::uint8_t reserved : 3;
   std::uint8_t handler_data_flag : 1;
 };
-}  // namespace ke
+}  // namespace except
 
 // NOLINTBEGIN(bugprone-reserved-identifier)
 // NOLINTBEGIN(readability-identifier-naming)
 extern "C"
 {
-  extern ke::index_entry_t const __exidx_start;
-  extern ke::index_entry_t const __exidx_end;
+  extern except::index_entry_t const __exidx_start;
+  extern except::index_entry_t const __exidx_end;
 }
 // NOLINTEND(readability-identifier-naming)
 // NOLINTEND(bugprone-reserved-identifier)

@@ -15,9 +15,9 @@
 cmake_minimum_required(VERSION 3.15)
 project(test_package LANGUAGES CXX)
 
-find_package(libhal-exceptions REQUIRED CONFIG)
+find_package(libexcept REQUIRED CONFIG)
 
 add_executable(${PROJECT_NAME} main.cpp)
 target_include_directories(${PROJECT_NAME} PUBLIC .)
-target_link_libraries(${PROJECT_NAME} PRIVATE libhal::exceptions)
+target_link_libraries(${PROJECT_NAME} PRIVATE libexcept::libexcept)
 target_compile_options(${PROJECT_NAME} PRIVATE -fexceptions -fno-rtti)
