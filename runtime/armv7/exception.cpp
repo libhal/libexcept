@@ -24,7 +24,7 @@
 #include <span>
 #include <typeinfo>
 
-#include <libhal-exceptions/new.hpp>
+#include <libexcept/allocator.hpp>
 
 #include "internal.hpp"
 
@@ -44,14 +44,14 @@ extern "C"
   void __wrap___cxa_end_cleanup();
   void __wrap__Unwind_Resume(void*);
   void __wrap___cxa_rethrow() noexcept(false);
-  void __wrap___cxa_throw(ke::exception_ptr p_thrown_exception,
+  void __wrap___cxa_throw(except::exception_ptr p_thrown_exception,
                           std::type_info* p_type_info,
-                          ke::destructor_t p_destructor) noexcept(false);
+                          except::destructor_t p_destructor) noexcept(false);
 }  // extern "C"
 // NOLINTEND(readability-identifier-naming)
 // NOLINTEND(bugprone-reserved-identifier)
 
-namespace ke {
+namespace except {
 
 struct instructions_t
 {
@@ -80,11 +80,11 @@ lu_t* get_lu(void* p_ptr)
  * @brief Captures all registers CPU registers
  *
  * Registers captured are R4-R12 and SP. The LR (link) register is copied into
- * the PC register of the `ke::cortex_m_cpu&`. The LR member variable of the
+ * the PC register of the `except::cortex_m_cpu&`. The LR member variable of the
  * input parameter is left as is and will be updated as the unwinding proceeds.
  *
  */
-[[gnu::naked, gnu::noinline]] void capture_cpu_core(ke::cortex_m_cpu&)
+[[gnu::naked, gnu::noinline]] void capture_cpu_core(except::cortex_m_cpu&)
 {
   asm volatile(
     // ARM calling conventions states that arguments are passed into R0-R3.
@@ -93,15 +93,15 @@ lu_t* get_lu(void* p_ptr)
     // Add 16 bytes to the address within R0 to skip over R0-R3. We assume
     // `__cxa_throw` & `__cxa_rethrow` will never utilize the `sp = r[nnnn]`
     // instruction, meaning that the non-callee preserved registers can be
-    // skipped. R0 now points to `ke::cortex_m_cpu::r4`
+    // skipped. R0 now points to `except::cortex_m_cpu::r4`
     "add   r0, #16\n"
-    // Store R4 to R12 into `ke::cortex_m_cpu::r4` to `ke::cortex_m_cpu::r12`.
+    // Store R4 to R12 into `except::cortex_m_cpu::r4` to `except::cortex_m_cpu::r12`.
     // The ! means, increment R<N> by the number of words stored. R0 now points
-    // at the `ke::cortex_m_cpu&`'s SP register.
+    // at the `except::cortex_m_cpu&`'s SP register.
     "stmia r0!, {r4-r12}\n"
-    // Store SP into [R0] (`ke::cortex_m_cpu&`'s SP register)
+    // Store SP into [R0] (`except::cortex_m_cpu&`'s SP register)
     "str sp, [r0]\n"
-    // Store LR into [R0 + 8] (`ke::cortex_m_cpu&`'s PC register)
+    // Store LR into [R0 + 8] (`except::cortex_m_cpu&`'s PC register)
     "str lr, [r0, #8]\n"
     "bx lr\n"
     "\n");
@@ -156,12 +156,12 @@ index_entry_t const& get_index_entry_near_point(std::uint32_t p_program_counter)
 {
   auto const index_table = get_arm_exception_index();
 
-  auto const block_power = ke::__except_abi::near_point_descriptor[0];
-  auto const program_offset = ke::__except_abi::near_point_descriptor[1];
+  auto const block_power = except::__except_abi::near_point_descriptor[0];
+  auto const program_offset = except::__except_abi::near_point_descriptor[1];
   auto const pc = p_program_counter - program_offset;
 
   auto const block_index = pc >> block_power;
-  auto const linear_info = ke::__except_abi::normal_table[block_index];
+  auto const linear_info = except::__except_abi::normal_table[block_index];
   auto const entry_start = linear_info >> block_power;
 
   auto const inter_block_mask = (1U << block_power) - 1U;
@@ -202,14 +202,14 @@ index_entry_t const& get_index_entry(std::uint32_t p_program_counter)
 
 std::uintptr_t near_point_guess_index(std::uintptr_t p_program_counter)
 {
-  auto const block_power = ke::__except_abi::near_point_descriptor[0];
-  auto const program_offset = ke::__except_abi::near_point_descriptor[1];
+  auto const block_power = except::__except_abi::near_point_descriptor[0];
+  auto const program_offset = except::__except_abi::near_point_descriptor[1];
   auto const pc = p_program_counter - program_offset;
 
   auto const inter_block_mask = (1U << block_power) - 1U;
   auto const inter_block_location = pc & inter_block_mask;
   auto const block_index = pc >> block_power;
-  auto const linear_info = ke::__except_abi::normal_table[block_index];
+  auto const linear_info = except::__except_abi::normal_table[block_index];
 
   auto const average_size = linear_info & inter_block_mask;
   auto const entry_start = linear_info >> block_power;
@@ -849,8 +849,10 @@ inline std::uintptr_t const* pop_register_range(std::uintptr_t const* sp_ptr,
 
 void unwind_frame(instructions_t const& p_instructions, cortex_m_cpu& p_cpu)
 {
+#if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wgnu-label-as-value"
+#endif
   static constexpr std::array<void*, 256> jump_table{
     &&vsp_add_0,   // [0]
     &&vsp_add_1,   // [1]
@@ -1177,7 +1179,9 @@ void unwind_frame(instructions_t const& p_instructions, cortex_m_cpu& p_cpu)
     &&reserved_or_spare_thus_terminate,  // 11011'110 []
     &&reserved_or_spare_thus_terminate,  // 11111'111 [255]
   };
+#if defined(__clang__)
 #pragma clang diagnostic pop
+#endif
 
   bool move_lr_to_pc = true;
   std::uint32_t u32_storage = 0;
@@ -1187,10 +1191,14 @@ void unwind_frame(instructions_t const& p_instructions, cortex_m_cpu& p_cpu)
   while (true) {
     auto const* instruction_handler = jump_table[*instruction_ptr];
     instruction_ptr++;
+#if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wgnu-label-as-value"
+#endif
     goto* instruction_handler;
+#if defined(__clang__)
 #pragma clang diagnostic pop
+#endif
 
   // +=========================================================================+
   // |                                 Finish!                                 |
@@ -1896,12 +1904,12 @@ consteval instructions_t spare_instruction()
 template<typename F>
 instructions_t cache(F* p_function_to_be_cached)
 {
-  ke::control_block.cache.state(runtime_state::handled_state);
+  except::control_block.cache.state(runtime_state::handled_state);
 
   auto const function_address =
     reinterpret_cast<std::uintptr_t>(p_function_to_be_cached);
 
-  auto const& entry = ke::get_index_entry(function_address);
+  auto const& entry = except::get_index_entry(function_address);
   if (entry.has_inlined_personality()) {
     return personality_to_unwind_instructions(&entry.personality_offset);
   } else {
@@ -1920,7 +1928,7 @@ instructions_t cache(F* p_function_to_be_cached)
 
 auto const cxa_throw_unwind_instructions = cache(&__wrap___cxa_throw);
 auto const cxa_rethrow_unwind_instructions = cache(&__wrap___cxa_rethrow);
-}  // namespace ke
+}  // namespace except
 
 // NOLINTBEGIN(bugprone-reserved-identifier)
 // NOLINTBEGIN(readability-identifier-naming)
@@ -1936,7 +1944,7 @@ extern "C"
 // NOLINTEND(readability-identifier-naming)
 // NOLINTEND(bugprone-reserved-identifier)
 
-namespace ke {
+namespace except {
 enum class rtti_type : std::uint8_t
 {
   class_type,
@@ -2076,7 +2084,7 @@ void flatten_rtti(exception_ptr p_thrown_exception,
     }
   }
 }
-}  // namespace ke
+}  // namespace except
 
 namespace {
 bool const volatile libhal_convince_compiler_to_emit_metadata = false;
@@ -2093,7 +2101,7 @@ bool const volatile libhal_convince_compiler_to_emit_metadata = false;
 LIBHAL_WEAK
 void* operator new(std::size_t p_size,
                    std::align_val_t p_align,
-                   ke::exception_allocation_tag)
+                   except::allocation_tag)
 {
   return ::operator new(p_size, p_align);
 }
@@ -2102,7 +2110,7 @@ LIBHAL_WEAK
 void operator delete(void* p_ptr,
                      std::size_t p_size,
                      std::align_val_t p_align,
-                     ke::exception_allocation_tag)
+                     except::allocation_tag)
 {
   ::operator delete(p_ptr, p_size, p_align);
 }
@@ -2120,26 +2128,26 @@ extern "C"
   // NOLINTNEXTLINE(readability-identifier-naming)
   void* __wrap___cxa_allocate_exception(size_t p_thrown_size)
   {
-    if (ke::control_block.cache.state() != ke::runtime_state::handled_state) {
+    if (except::control_block.cache.state() != except::runtime_state::handled_state) {
       std::terminate();
     }
 
     // We set the state to `get_next_frame` to prep the control block state but
     // more importantly, in order to detect if the allocator throws bad alloc
     // and we re-enter this function, we can detect that and terminate.
-    ke::control_block.cache.state(ke::runtime_state::get_next_frame);
+    except::control_block.cache.state(except::runtime_state::get_next_frame);
 
-    constexpr auto exception_wrapper_size = sizeof(ke::exception_allocation<>);
+    constexpr auto exception_wrapper_size = sizeof(except::exception_allocation<>);
     auto const allocation_amount = exception_wrapper_size + p_thrown_size;
-    // using alloc_tag = ke::exception_allocation_tag;
+    // using alloc_tag = except::allocation_tag;
 
     // Currently: always max_align_t since we don't know better
     [[maybe_unused]] constexpr auto align = alignof(std::max_align_t);
 
     auto* exception_address = ::operator new(allocation_amount,
                                              std::align_val_t{ align },
-                                             ke::exception_allocation_tag{});
-    auto* object = static_cast<ke::exception_allocation<>*>(exception_address);
+                                             except::allocation_tag{});
+    auto* object = static_cast<except::exception_allocation<>*>(exception_address);
 
     object->size = allocation_amount;
 
@@ -2149,14 +2157,14 @@ extern "C"
   // NOLINTNEXTLINE(readability-identifier-naming)
   void __wrap___cxa_free_exception(void* p_thrown_exception)
   {
-    auto object = ke::get_allocation_from_exception(p_thrown_exception);
+    auto object = except::get_allocation_from_exception(p_thrown_exception);
 
     // Match the allocation
     constexpr auto align = alignof(std::max_align_t);
     ::operator delete(object,
                       object->size,
                       std::align_val_t{ align },
-                      ke::exception_allocation_tag{});
+                      except::allocation_tag{});
   }
 
   // NOLINTBEGIN(readability-identifier-naming)
@@ -2170,7 +2178,7 @@ extern "C"
   // NOLINTNEXTLINE(readability-identifier-naming)
   void __wrap___cxa_end_catch()
   {
-    auto& control_block = ke::control_block;
+    auto& control_block = except::control_block;
     if (control_block.cache.rethrown()) {
       control_block.cache.rethrown(false);
     } else {
@@ -2181,18 +2189,18 @@ extern "C"
   // NOLINTNEXTLINE(readability-identifier-naming)
   void* __wrap___cxa_begin_catch(void*)
   {
-    auto& control_block = ke::control_block;
-    control_block.cache.state(ke::runtime_state::handled_state);
+    auto& control_block = except::control_block;
+    control_block.cache.state(except::runtime_state::handled_state);
     return control_block.thrown_object;
   }
 
   // NOLINTNEXTLINE(readability-identifier-naming)
   void __wrap___cxa_end_cleanup()
   {
-    auto& control_block = ke::control_block;
-    control_block.cache.state(ke::runtime_state::unwind_frame);
+    auto& control_block = except::control_block;
+    control_block.cache.state(except::runtime_state::unwind_frame);
     // Raise exception returns when an error or call to terminate has been found
-    ke::raise_exception(control_block);
+    except::raise_exception(control_block);
     std::terminate();
   }
 
@@ -2201,21 +2209,21 @@ extern "C"
   void __wrap__Unwind_Resume(void*)
   // NOLINTEND(readability-identifier-naming)
   {
-    auto& control_block = ke::control_block;
-    control_block.cache.state(ke::runtime_state::unwind_frame);
+    auto& control_block = except::control_block;
+    control_block.cache.state(except::runtime_state::unwind_frame);
     // Raise exception returns when an error or call to terminate has been found
-    ke::raise_exception(control_block);
+    except::raise_exception(control_block);
     std::terminate();
   }
 
   // NOLINTNEXTLINE(readability-identifier-naming)
   void __wrap___cxa_rethrow() noexcept(false)
   {
-    auto& control_block = ke::control_block;
+    auto& control_block = except::control_block;
 
-    ke::capture_cpu_core(control_block.cpu);
+    except::capture_cpu_core(control_block.cpu);
 
-    control_block.cache.state(ke::runtime_state::get_next_frame);
+    control_block.cache.state(except::runtime_state::get_next_frame);
     control_block.cache.rethrown(true);
 
     // This must ALWAYS evaluate to false. But since the variable is volatile,
@@ -2228,27 +2236,27 @@ extern "C"
                                // have in the C++ throw RTTI list, might as well
                                // reuse it here.
     }
-    ke::unwind_frame(ke::cxa_rethrow_unwind_instructions, control_block.cpu);
+    except::unwind_frame(except::cxa_rethrow_unwind_instructions, control_block.cpu);
     // Raise exception returns when an error or call to terminate has been found
-    ke::raise_exception(control_block);
+    except::raise_exception(control_block);
 
     // If raise exception returns it means it failed and we should terminate
-    control_block.cache.state(ke::runtime_state::handled_state);
+    control_block.cache.state(except::runtime_state::handled_state);
     std::terminate();
   }
 
   // NOLINTNEXTLINE(readability-identifier-naming)
-  void __wrap___cxa_throw(ke::exception_ptr p_thrown_exception,
+  void __wrap___cxa_throw(except::exception_ptr p_thrown_exception,
                           std::type_info* p_type_info,
-                          ke::destructor_t p_destructor) noexcept(false)
+                          except::destructor_t p_destructor) noexcept(false)
   {
-    auto& control_block = ke::control_block;
+    auto& control_block = except::control_block;
 
     control_block.type_info.reset();
     control_block.thrown_object = p_thrown_exception;
     control_block.destructor = p_destructor;
-    ke::capture_cpu_core(control_block.cpu);
-    ke::flatten_rtti(p_thrown_exception, control_block.type_info, p_type_info);
+    except::capture_cpu_core(control_block.cpu);
+    except::flatten_rtti(p_thrown_exception, control_block.type_info, p_type_info);
 
     // This must ALWAYS evaluate to false. But since the variable is volatile,
     // the compiler will not optimize it away and thus, __wrap___cxa_throw will
@@ -2261,99 +2269,14 @@ extern "C"
                                // reuse it here.
     }
     // Use the expanded unwind instructions to quickly unwind cxa_throw.
-    ke::unwind_frame(ke::cxa_throw_unwind_instructions, control_block.cpu);
+    except::unwind_frame(except::cxa_throw_unwind_instructions, control_block.cpu);
 
     // Raise exception returns when an error or call to terminate has been found
-    ke::raise_exception(control_block);
+    except::raise_exception(control_block);
 
     // If raise exception returns it means it failed and we should terminate
-    control_block.cache.state(ke::runtime_state::handled_state);
+    control_block.cache.state(except::runtime_state::handled_state);
     std::terminate();
   }
 }  // extern "C"
 // NOLINTEND(bugprone-reserved-identifier)
-<<<<<<<< HEAD:v1/src/arm_cortex/estell/exception.cpp
-
-namespace __cxxabiv1 {                                // NOLINT
-std::terminate_handler __terminate_handler = +[]() {  // NOLINT
-  while (true) {
-    continue;
-  }
-};
-}  // namespace __cxxabiv1
-
-namespace hal {
-std::terminate_handler set_terminate(
-  std::terminate_handler p_terminate_handler) noexcept
-{
-  auto copy = __cxxabiv1::__terminate_handler;
-  __cxxabiv1::__terminate_handler = p_terminate_handler;
-  return copy;
-}
-
-std::terminate_handler get_terminate() noexcept
-{
-  return __cxxabiv1::__terminate_handler;
-}
-
-/**
- * @brief Simple exception allocator
- *
- * This allocator can only allocates space for a single exception object at a
- * time.
- */
-class single_exception_allocator : public std::pmr::memory_resource
-{
-public:
-  single_exception_allocator() = default;
-  ~single_exception_allocator() override = default;
-
-private:
-  void* do_allocate(std::size_t p_size,  // NOLINT
-                    [[maybe_unused]] std::size_t p_alignment) override
-  {
-    if (m_allocated || p_size > m_buffer.size()) {
-      std::terminate();
-    }
-    m_allocated = true;
-    return m_buffer.data();
-  }
-
-  void do_deallocate(void* p_address,
-                     [[maybe_unused]] std::size_t p_size,  // NOLINT
-                     [[maybe_unused]] std::size_t p_alignment) override
-  {
-    if (p_address != m_buffer.data()) {
-      std::terminate();
-    }
-    m_allocated = false;
-  }
-
-  [[nodiscard]] bool do_is_equal(
-    std::pmr::memory_resource const& other) const noexcept override
-  {
-    return this == &other;
-  }
-
-  alignas(std::max_align_t) std::array<std::uint8_t, 96> m_buffer{};
-  bool m_allocated = false;
-};
-
-// TODO(#11): Add macro to IFDEF this out if the user want to save 64 bytes.
-// NOLINTNEXTLINE
-single_exception_allocator _default_allocator{};
-// NOLINTNEXTLINE
-std::pmr::memory_resource* _exception_allocator = &_default_allocator;
-
-void set_exception_allocator(std::pmr::memory_resource& p_allocator) noexcept
-{
-  _exception_allocator = &p_allocator;
-}
-
-std::pmr::memory_resource& get_exception_allocator() noexcept
-{
-  return *_exception_allocator;
-}
-}  // namespace hal
-========
->>>>>>>> f7f80c8 (:rocket: Add LLVM support):v2/src/arm_cortex/estell/exception.cpp

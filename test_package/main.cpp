@@ -18,7 +18,7 @@
 #include <array>
 #include <exception>
 
-#include <libhal-exceptions/new.hpp>
+#include <libexcept/allocator.hpp>
 
 // NOLINTBEGIN(readability-identifier-naming)
 struct V  // NOLINT(readability-identifier-naming)
@@ -89,11 +89,9 @@ void foo()
   throw error{};
 }
 
-#if defined(LIBHAL_ESTELL_EXCEPTIONS) || 1
-
 std::array<std::byte, 128> m_buffer{};
 
-void* operator new(std::size_t, std::align_val_t, ke::exception_allocation_tag)
+void* operator new(std::size_t, std::align_val_t, except::allocation_tag)
 {
   m_buffer.fill(std::byte{ 0 });
   return m_buffer.data();
@@ -102,11 +100,10 @@ void* operator new(std::size_t, std::align_val_t, ke::exception_allocation_tag)
 void operator delete(void*,
                      std::size_t,
                      std::align_val_t,
-                     ke::exception_allocation_tag)
+                     except::allocation_tag)
 {
   m_buffer.fill(std::byte{ 0 });
 }
-#endif  // defined(LIBHAL_ESTELL_EXCEPTIONS)
 
 int main()
 {

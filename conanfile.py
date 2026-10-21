@@ -16,7 +16,6 @@ from conan import ConanFile
 from conan.tools.cmake import CMake, cmake_layout
 from conan.tools.files import copy
 from conan.tools.build import check_min_cppstd
-from conan.errors import ConanException
 from pathlib import Path
 
 required_conan_version = ">=2.0.14"
@@ -33,7 +32,12 @@ class except_conan(ConanFile):
     settings = "compiler", "build_type", "os", "arch"
     generators = "CMakeDeps", "CMakeToolchain", "VirtualBuildEnv"
     exports_sources = ("include/*", "tests/*", "LICENSE",
-                       "CMakeLists.txt", "src/*", "linker_scripts/*")
+                       "CMakeLists.txt", "runtime/*", "nearpoint/*",
+                       "linker_scripts/*")
+
+    @property
+    def _min_cppstd(self):
+        return "20"
 
     @property
     def _is_arm_cortex(self):
@@ -80,7 +84,6 @@ class except_conan(ConanFile):
         cmake.install()
 
     def package_info(self):
-        self.cpp_info.libs = ["except"]
         self.cpp_info.set_property("cmake_target_name", "libexcept::libexcept")
         self.cpp_info.defines = ["LIBEXCEPT=1"]
         self.cpp_info.exelinkflags.extend([
@@ -94,11 +97,19 @@ class except_conan(ConanFile):
             "-Wl,--wrap=_Unwind_Resume",
         ])
 
-        package_folder = Path(self.package_folder)
-        lib_path = package_folder / 'lib' / 'libhal-exceptions.a'
-        self.cpp_info.exelinkflags.extend([
-            # Ensure that all symbols are added to the linker's symbol table
-            "-Wl,--whole-archive",
-            str(lib_path),
-            "-Wl,--no-whole-archive",
-        ])
+        # CMakeLists.txt builds libexcept as an OBJECT library and installs
+        # the loose .o files (no .a, no CMake package config of our own -
+        # Conan synthesizes the libexcept::libexcept target for consumers
+        # from this cpp_info directly). Passing the .o files themselves on
+        # the link line makes the linker include them unconditionally, same
+        # as -Wl,--whole-archive used to force for a .a - so that flag isn't
+        # needed here either.
+        # CMake's OBJECTS DESTINATION install nests these under
+        # lib/objects-<CONFIG>/<target>/<source-relative-path>.o(bj), to
+        # keep object files with the same basename from different source
+        # subdirectories from colliding, so this has to search recursively
+        # rather than just listing lib/ itself.
+        object_dir = Path(self.package_folder) / "lib"
+        self.cpp_info.exelinkflags.extend(
+            sorted(str(p) for p in object_dir.rglob("*")
+                   if p.is_file() and p.suffix in (".o", ".obj")))
