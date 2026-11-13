@@ -5,7 +5,7 @@
 void terminate_handler()
 {
   while (true) {
-    continue;
+    // Empty: Clang deletes an infinite loop that holds only `continue;`
   }
 }
 
