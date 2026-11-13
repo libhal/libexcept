@@ -2122,7 +2122,11 @@ extern "C"
 {
   void _exit([[maybe_unused]] int rc)  // NOLINT
   {
-    std::terminate();
+    while (true) {
+      // Halt here. Calling std::terminate() would recurse: the default
+      // terminate handler calls abort(), which calls _exit() again, until the
+      // stack overflows.
+    }
   }
 
   // NOLINTNEXTLINE(readability-identifier-naming)
