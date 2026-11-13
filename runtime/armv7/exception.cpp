@@ -1753,64 +1753,138 @@ void unwind_frame(instructions_t const& p_instructions, cortex_m_cpu& p_cpu)
   }
 }
 
+consteval instructions_t spare_instruction()
+{
+  instructions_t spare{};
+  // This is the SPARE instruction directly after the FINISH instruction within
+  // the ARM EH ABI.
+  spare.data[0] = 0b10110001;
+  spare.data[1] = 0b00000000;
+  return spare;
+}
+
+/**
+ * @brief Decodes a function's unwind instructions from its exception table
+ * entry
+ *
+ * The instructions are the header's low bytes, then four from each extra word,
+ * most significant byte first, up to the first finish instruction. Personality
+ * routines 1 and 2 keep the extra word count in the header's bits 23:16, so
+ * only its low two bytes are instructions. Personality routine 0 and the
+ * generic model use the low three.
+ *
+ * instructions_t holds 7 instructions. A function with more, or with an
+ * unknown personality routine, gets the spare instruction, which terminates,
+ * rather than unwinding with some of its instructions missing.
+ *
+ * @param p_handler_data - the first word of the unwind instructions: the
+ * index entry's second word, a compact model entry, or the word after a
+ * generic model entry's personality routine address.
+ * @return instructions_t - the unwind instructions, ending with finish
+ */
 [[gnu::always_inline]]
 constexpr instructions_t personality_to_unwind_instructions(
   std::uint32_t const* p_handler_data)
 {
-  constexpr auto personality_type = hal::bit_mask::from<24, 27>();
+  constexpr auto personality_index = hal::bit_mask::from<24, 27>();
+
+  std::uint32_t const header = p_handler_data[0];
+  std::uint32_t header_bytes = 3;
+  if (is_compact_model(header)) {
+    auto const index = hal::bit_extract<personality_index>(header);
+    if (index > 2) {
+      return spare_instruction();
+    }
+    if (index != 0) {
+      header_bytes = 2;
+    }
+  }
 
   instructions_t unwind;
-  std::uint32_t header = p_handler_data[0];
-
-  if (hal::bit_extract<personality_type>(header) == 0x0) {
-    unwind.data[0] = hal::bit_extract<su16::instruction0>(header);
-    unwind.data[1] = hal::bit_extract<su16::instruction1>(header);
-    unwind.data[2] = hal::bit_extract<su16::instruction2>(header);
-  } else {
-    std::uint32_t first_word = p_handler_data[1];
-    std::uint32_t length = hal::bit_extract<lu16_32::length>(header);
-    switch (length) {
-      case 1: {
-        unwind.data[0] = hal::bit_extract<lu16_32::instruction0>(header);
-        unwind.data[1] = hal::bit_extract<lu16_32::instruction1>(header);
-        unwind.data[2] = hal::bit_extract<lu16_32::instruction2>(first_word);
-        unwind.data[3] = hal::bit_extract<lu16_32::instruction3>(first_word);
-        unwind.data[4] = hal::bit_extract<lu16_32::instruction4>(first_word);
-        unwind.data[5] = hal::bit_extract<lu16_32::instruction5>(first_word);
-        break;
-      }
-      case 2: {
-        uint32_t last_word = p_handler_data[2];
-        unwind.data[0] = hal::bit_extract<lu16_32::instruction0>(header);
-        unwind.data[1] = hal::bit_extract<lu16_32::instruction1>(header);
-        unwind.data[2] = hal::bit_extract<lu16_32::instruction2>(first_word);
-        unwind.data[3] = hal::bit_extract<lu16_32::instruction3>(first_word);
-        unwind.data[4] = hal::bit_extract<lu16_32::instruction4>(first_word);
-        unwind.data[5] = hal::bit_extract<lu16_32::instruction5>(first_word);
-        unwind.data[6] = hal::bit_extract<lu16_32::instruction6>(last_word);
-        break;
-      }
-      default: {
-        // When a function uses rethrow, this seems to cause a glitch with
-        // GCC's handler data. For example I've seen: 0x01'b1'08'84 for the
-        // first word and 0x00'b0'b0'b0 for the second word.
-        // This doesn't makes sense because the PR index is 1 but the length
-        // is 0xB1 which is too large. But it does make sense if you simply
-        // assume that 0xB1 is the first instruction, then 0x08, then 0x84
-        // 0x00. This works. So when we see this mix, we just collect
-        // instructions in that order as if it were a 2-word PR0.
-        unwind.data[0] = hal::bit_extract<su16::instruction0>(header);
-        unwind.data[1] = hal::bit_extract<su16::instruction1>(header);
-        unwind.data[2] = hal::bit_extract<su16::instruction2>(header);
-        unwind.data[3] = hal::bit_extract<lu16_32::instruction2>(first_word);
-        unwind.data[4] = hal::bit_extract<lu16_32::instruction3>(first_word);
-        unwind.data[5] = hal::bit_extract<lu16_32::instruction4>(first_word);
-        unwind.data[6] = hal::bit_extract<lu16_32::instruction5>(first_word);
-      }
+  std::size_t count = 0;
+  // Bytes count from the header's most significant byte.
+  auto const first = 4 - header_bytes;
+  auto const last = 4 + (4 * unwind_word_count(header));
+  for (auto position = first; position < last; position++) {
+    auto const word = p_handler_data[position / 4];
+    auto const shift = 24 - (8 * (position % 4));
+    auto const instruction = static_cast<std::uint8_t>(word >> shift);
+    if (instruction == arm_ehabi::finish) {
+      break;
     }
+    if (count == (unwind.data.size() - 1)) {
+      return spare_instruction();
+    }
+    unwind.data[count] = instruction;
+    count++;
   }
   return unwind;
 }
+
+// Compile-time checks of the decode and of where the LSDA starts (#35). The
+// entries with 0x01, 0x02 or 0x97 first come from GCC 14.3 and Clang 23 builds
+// for the Cortex-M3 and Cortex-M4F.
+namespace decode_checks {
+constexpr auto f = arm_ehabi::finish;
+constexpr std::array<std::uint8_t, 8> spare = { 0xb1, 0x00, f, f, f, f, f, f };
+
+constexpr bool decodes_to(std::array<std::uint32_t, 3> p_words,
+                          std::array<std::uint8_t, 8> p_instructions)
+{
+  return personality_to_unwind_instructions(p_words.data()).data ==
+         p_instructions;
+}
+
+// Compact model, personality routine 0
+static_assert(decodes_to({ 0x800a'afb0 }, { 0x0a, 0xaf, f, f, f, f, f, f }));
+// Generic model, no extra words
+static_assert(decodes_to({ 0x000a'afb0 }, { 0x0a, 0xaf, f, f, f, f, f, f }));
+// Generic model, one extra word, `vsp = r7` first (frame pointer)
+static_assert(decodes_to({ 0x0197'4680, 0xf0ab'b0b0 },
+                         { 0x97, 0x46, 0x80, 0xf0, 0xab, f, f, f }));
+// Generic model, one extra word, `vsp += 8` first (GCC, variadic function)
+static_assert(decodes_to({ 0x0101'a8b1, 0x0fb0'b0b0 },
+                         { 0x01, 0xa8, 0xb1, 0x0f, f, f, f, f }));
+// Generic model, one extra word, `vsp += 12` first (Clang, variadic function)
+static_assert(decodes_to({ 0x0102'8408, 0x02b0'b0b0 },
+                         { 0x02, 0x84, 0x08, 0x02, f, f, f, f }));
+// Generic model, one extra word, `vsp += 8` first (Cortex-M4F, vpush {d8})
+static_assert(decodes_to({ 0x0101'c980, 0x8408'b0b0 },
+                         { 0x01, 0xc9, 0x80, 0x84, 0x08, f, f, f }));
+// Generic model, seven instructions
+static_assert(decodes_to({ 0x0101'0203, 0x0405'0607 },
+                         { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, f }));
+// Compact model, personality routine 1, one extra word
+static_assert(decodes_to({ 0x8101'8408, 0x02b0'b0b0 },
+                         { 0x84, 0x08, 0x02, f, f, f, f, f }));
+// Compact model, personality routine 2, seven instructions in two extra words
+static_assert(decodes_to({ 0x8202'0102, 0x0304'0506, 0x07b0'b0b0 },
+                         { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, f }));
+// More than seven instructions terminate instead of unwinding without some
+static_assert(decodes_to({ 0x0201'0203, 0x0405'0607, 0x08b0'b0b0 }, spare));
+// An unknown personality routine terminates
+static_assert(decodes_to({ 0x8300'0000 }, spare));
+
+// The LSDA follows a generic entry's personality routine address and its
+// unwind instruction words.
+constexpr std::array<std::uint32_t, 4> one_extra_word = { 0x7fff'f000,
+                                                          0x0102'8408,
+                                                          0x02b0'b0b0,
+                                                          0xffff'0108 };
+static_assert(index_entry_t::lsda_data(one_extra_word.data()) ==
+              (one_extra_word.data() + 3));
+constexpr std::array<std::uint32_t, 3> no_extra_words = { 0x7fff'f000,
+                                                          0x000a'afb0,
+                                                          0xffff'0108 };
+static_assert(index_entry_t::lsda_data(no_extra_words.data()) ==
+              (no_extra_words.data() + 2));
+// Compact model descriptors follow the unwind instruction words.
+constexpr std::array<std::uint32_t, 3> compact_one_extra_word = { 0x8101'8408,
+                                                                  0x02b0'b0b0,
+                                                                  0x0000'0000 };
+static_assert(index_entry_t::descriptor_start(compact_one_extra_word.data()) ==
+              (compact_one_extra_word.data() + 2));
+}  // namespace decode_checks
 
 [[gnu::always_inline]]
 constexpr instructions_t create_instructions_from_entry(
@@ -1889,16 +1963,6 @@ void raise_exception(exception_control_block& p_exception_object)
       }
     }
   }
-}
-
-consteval instructions_t spare_instruction()
-{
-  instructions_t spare{};
-  // This is the SPARE instruction directly after the FINISH instruction within
-  // the ARM EH ABI.
-  spare.data[0] = 0b10110001;
-  spare.data[1] = 0b00000000;
-  return spare;
 }
 
 template<typename F>
