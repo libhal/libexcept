@@ -95,6 +95,13 @@ class except_conan(ConanFile):
             "-Wl,--wrap=__cxa_begin_catch",
             "-Wl,--wrap=__cxa_end_cleanup",
             "-Wl,--wrap=_Unwind_Resume",
+            # __wrap___cxa_throw() expects an exception from
+            # __wrap___cxa_allocate_exception(), which readies the control
+            # block. Without these, the C++ runtime's allocator runs instead,
+            # and every throw terminates.
+            "-Wl,--wrap=__cxa_allocate_exception",
+            "-Wl,--wrap=__cxa_free_exception",
+            "-Wl,--wrap=__cxa_call_unexpected",
         ])
 
         # CMakeLists.txt builds libexcept as an OBJECT library and installs
