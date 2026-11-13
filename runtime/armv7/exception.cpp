@@ -95,17 +95,27 @@ lu_t* get_lu(void* p_ptr)
     // instruction, meaning that the non-callee preserved registers can be
     // skipped. R0 now points to `except::cortex_m_cpu::r4`
     "add   r0, #16\n"
-    // Store R4 to R12 into `except::cortex_m_cpu::r4` to `except::cortex_m_cpu::r12`.
-    // The ! means, increment R<N> by the number of words stored. R0 now points
-    // at the `except::cortex_m_cpu&`'s SP register.
+    // Store R4 to R12 into `except::cortex_m_cpu::r4` to
+    // `except::cortex_m_cpu::r12`. The ! means, increment R<N> by the number of
+    // words stored. R0 now points at the `except::cortex_m_cpu&`'s SP register.
     "stmia r0!, {r4-r12}\n"
     // Store SP into [R0] (`except::cortex_m_cpu&`'s SP register)
     "str sp, [r0]\n"
     // Store LR into [R0 + 8] (`except::cortex_m_cpu&`'s PC register)
     "str lr, [r0, #8]\n"
+#if defined(__ARM_FP)
+    // Store D8 to D15 into `except::cortex_m_cpu::d8_to_d15`, right after PC
+    "add r0, #12\n"
+    "vstmia r0, {d8-d15}\n"
+#endif
     "bx lr\n"
     "\n");
 }
+
+#if defined(__ARM_FP)
+static_assert(offsetof(except::cortex_m_cpu, d8_to_d15) ==
+              (16 * sizeof(except::register_t)));
+#endif
 
 struct index_less_than
 {
@@ -492,6 +502,11 @@ template<lsda_encoding encoding>
     // Load R4 to R12 from `cortex_m_cpu` and increment the register's
     // address. R2 now points to the SP register
     "ldmia.w	r2!, {r4, r5, r6, r7, r8, r9, r10, r11, r12}\n"
+#if defined(__ARM_FP)
+    // Load D8 to D15 from `cortex_m_cpu::d8_to_d15`, 12 bytes past SP
+    "add      r3, r2, #12\n"
+    "vldmia   r3, {d8-d15}\n"
+#endif
     // Unfortunately SP cannot be in the list above, so we set it here
     "ldr sp, [r2]\n"
     // Load LR
@@ -847,6 +862,38 @@ inline std::uintptr_t const* pop_register_range(std::uintptr_t const* sp_ptr,
   return sp_ptr + PopCount + 1 + unsigned{ PopLinkRegister == pop_lr::do_it };
 }
 
+#if defined(__ARM_FP)
+/**
+ * @brief Pops consecutive double-precision registers off the virtual stack
+ *
+ * Each register is two words, lowest-numbered register at the lowest address.
+ * Only d8 to d15 are kept, the registers a callee must preserve. d0 to d7 are
+ * not preserved across a call, and Cortex-M floating-point units have no d16
+ * to d31, so their words are skipped.
+ *
+ * @param p_sp - the virtual stack pointer
+ * @param p_first - the number of the first register
+ * @param p_count - the number of registers
+ * @param p_cpu - receives d8 to d15
+ * @return std::uintptr_t const* - the virtual stack pointer past the registers
+ */
+inline std::uintptr_t const* pop_vfp_registers(std::uintptr_t const* p_sp,
+                                               std::uint32_t p_first,
+                                               std::uint32_t p_count,
+                                               cortex_m_cpu& p_cpu)
+{
+  for (std::uint32_t index = 0; index < p_count; index++) {
+    auto const number = p_first + index;
+    if ((number >= 8) and (number <= 15)) {
+      auto const word = 2 * (number - 8);
+      p_cpu.d8_to_d15[word] = p_sp[2 * index];
+      p_cpu.d8_to_d15[word + 1] = p_sp[(2 * index) + 1];
+    }
+  }
+  return p_sp + (2 * p_count);
+}
+#endif
+
 void unwind_frame(instructions_t const& p_instructions, cortex_m_cpu& p_cpu)
 {
 #if defined(__clang__)
@@ -1060,9 +1107,12 @@ void unwind_frame(instructions_t const& p_instructions, cortex_m_cpu& p_cpu)
     // Subtract VSP using uleb128
     &&subtract_vsp_using_uleb128,  // 10110010 [178]
 
+#if defined(__ARM_FP)
     // Pop VFP double-precision registers
-    // TODO(#27): Add support for this
+    &&pop_vfp_registers_saved_by_fstmfdx,  // 10110011 [179]
+#else
     &&reserved_or_spare_thus_terminate,  // 10110011 [179]
+#endif
 
     // Pop Return Address Authentication Code pseudo-register
     // TODO(#28): Add support for this
@@ -1076,8 +1126,17 @@ void unwind_frame(instructions_t const& p_instructions, cortex_m_cpu& p_cpu)
     &&reserved_or_spare_thus_terminate,  // 10110110 [182]
     &&reserved_or_spare_thus_terminate,  // 10110111 [183]
 
+#if defined(__ARM_FP)
     // Pop VFP double-precision registers D[8]-D[8+nnn] saved 10111nnn
-    // TODO(#30): Add support for this
+    &&pop_vfp_d8_and_up_saved_by_fstmfdx,  // 10111'000 [184]
+    &&pop_vfp_d8_and_up_saved_by_fstmfdx,  // 10111'001 [185]
+    &&pop_vfp_d8_and_up_saved_by_fstmfdx,  // 10111'010 [186]
+    &&pop_vfp_d8_and_up_saved_by_fstmfdx,  // 10111'011 [187]
+    &&pop_vfp_d8_and_up_saved_by_fstmfdx,  // 10111'100 [188]
+    &&pop_vfp_d8_and_up_saved_by_fstmfdx,  // 10111'101 [189]
+    &&pop_vfp_d8_and_up_saved_by_fstmfdx,  // 10111'110 [190]
+    &&pop_vfp_d8_and_up_saved_by_fstmfdx,  // 10111'111 [191]
+#else
     &&reserved_or_spare_thus_terminate,  // 10111'000 [184]
     &&reserved_or_spare_thus_terminate,  // 10111'001 [185]
     &&reserved_or_spare_thus_terminate,  // 10111'010 [186]
@@ -1086,6 +1145,7 @@ void unwind_frame(instructions_t const& p_instructions, cortex_m_cpu& p_cpu)
     &&reserved_or_spare_thus_terminate,  // 10111'101 [189]
     &&reserved_or_spare_thus_terminate,  // 10111'110 [190]
     &&reserved_or_spare_thus_terminate,  // 10111'111 [191]
+#endif
 
     // Intel Wireless MMX pop wR[10]-wR[10+nnn] 11000nnn
     // NOTE: We will probably never support these. No modern ARM device is still
@@ -1106,15 +1166,21 @@ void unwind_frame(instructions_t const& p_instructions, cortex_m_cpu& p_cpu)
     // Spare (11000111)
     &&reserved_or_spare_thus_terminate,  // 11000'111 [199]
 
+#if defined(__ARM_FP)
     // Pop VFP double precision registers D[ssss]-D[ssss+cccc] saved (as if) by
     // VPUSH (11001000)
-    // TODO(#31): Add support for this
+    &&pop_vfp_d16_and_up_saved_by_vpush,  // 11001000 [200]
+#else
     &&reserved_or_spare_thus_terminate,  // 11001000 [200]
+#endif
 
+#if defined(__ARM_FP)
     // Pop VFP double precision registers D[ssss]-D[ssss+cccc] saved (as if) by
     // VPUSH (11001001)
-    // TODO(#32): Add support for this
+    &&pop_vfp_registers_saved_by_vpush,  // 11001001 [201]
+#else
     &&reserved_or_spare_thus_terminate,  // 11001001 [201]
+#endif
 
     // Spare (yyy != 000, 001) 11001yyy
     &&reserved_or_spare_thus_terminate,  // 11001'010 [202]
@@ -1124,8 +1190,17 @@ void unwind_frame(instructions_t const& p_instructions, cortex_m_cpu& p_cpu)
     &&reserved_or_spare_thus_terminate,  // 11001'110 [206]
     &&reserved_or_spare_thus_terminate,  // 11001'111 [207]
 
+#if defined(__ARM_FP)
     // Pop VFP double-precision registers D[8]-D[8+nnn] saved by VPUSH 11010nnn
-    // TODO(#33): Add support for this
+    &&pop_vfp_d8_and_up_saved_by_vpush,  // 11010'000 [208]
+    &&pop_vfp_d8_and_up_saved_by_vpush,  // 11010'001 [209]
+    &&pop_vfp_d8_and_up_saved_by_vpush,  // 11010'010 [210]
+    &&pop_vfp_d8_and_up_saved_by_vpush,  // 11010'011 [211]
+    &&pop_vfp_d8_and_up_saved_by_vpush,  // 11010'100 [212]
+    &&pop_vfp_d8_and_up_saved_by_vpush,  // 11010'101 [213]
+    &&pop_vfp_d8_and_up_saved_by_vpush,  // 11010'110 [214]
+    &&pop_vfp_d8_and_up_saved_by_vpush,  // 11010'111 [215]
+#else
     &&reserved_or_spare_thus_terminate,  // 11010'000 [208]
     &&reserved_or_spare_thus_terminate,  // 11010'001 [209]
     &&reserved_or_spare_thus_terminate,  // 11010'010 [210]
@@ -1134,6 +1209,7 @@ void unwind_frame(instructions_t const& p_instructions, cortex_m_cpu& p_cpu)
     &&reserved_or_spare_thus_terminate,  // 11010'101 [213]
     &&reserved_or_spare_thus_terminate,  // 11010'110 [214]
     &&reserved_or_spare_thus_terminate,  // 11010'111 [215]
+#endif
 
     // Spare (xxx != 000, 001, 010) 11xxxyyy
 
@@ -1293,6 +1369,51 @@ void unwind_frame(instructions_t const& p_instructions, cortex_m_cpu& p_cpu)
 
     instruction_ptr++;
     continue;
+
+#if defined(__ARM_FP)
+  // +=========================================================================+
+  // |                Pop VFP double-precision registers                       |
+  // +=========================================================================+
+  // FSTMFDX saves one more word than the registers, so those forms skip it.
+  // Without a floating-point unit, these instructions can't appear, and their
+  // table entries terminate.
+  pop_vfp_registers_saved_by_vpush:
+    // sssscccc: D[ssss] to D[ssss+cccc]
+    sp_ptr = pop_vfp_registers(
+      sp_ptr, *instruction_ptr >> 4U, (*instruction_ptr & 0xFU) + 1U, p_cpu);
+    instruction_ptr++;
+    continue;
+
+  pop_vfp_d16_and_up_saved_by_vpush:
+    // sssscccc: D[16+ssss] to D[16+ssss+cccc]
+    sp_ptr = pop_vfp_registers(sp_ptr,
+                               16U + (*instruction_ptr >> 4U),
+                               (*instruction_ptr & 0xFU) + 1U,
+                               p_cpu);
+    instruction_ptr++;
+    continue;
+
+  pop_vfp_d8_and_up_saved_by_vpush:
+    // 11010nnn: D[8] to D[8+nnn]
+    sp_ptr = pop_vfp_registers(
+      sp_ptr, 8U, (*(instruction_ptr - 1U) & 0b111U) + 1U, p_cpu);
+    continue;
+
+  pop_vfp_registers_saved_by_fstmfdx:
+    // sssscccc: D[ssss] to D[ssss+cccc]
+    sp_ptr = pop_vfp_registers(
+      sp_ptr, *instruction_ptr >> 4U, (*instruction_ptr & 0xFU) + 1U, p_cpu);
+    sp_ptr++;
+    instruction_ptr++;
+    continue;
+
+  pop_vfp_d8_and_up_saved_by_fstmfdx:
+    // 10111nnn: D[8] to D[8+nnn]
+    sp_ptr = pop_vfp_registers(
+      sp_ptr, 8U, (*(instruction_ptr - 1U) & 0b111U) + 1U, p_cpu);
+    sp_ptr++;
+    continue;
+#endif
 
   // +=========================================================================+
   // |                            VSP = R[nnnn]                                |

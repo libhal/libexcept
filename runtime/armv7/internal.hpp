@@ -285,11 +285,18 @@ struct cortex_m_cpu
   register_t sp;
   register_t lr;
   register_t pc;
+#if defined(__ARM_FP)
+  /// d8 to d15, the floating-point registers a callee must preserve, as 16
+  /// words with each register's low word first. capture_cpu_core() and
+  /// restore_cpu_core() store and load them right after pc.
+  std::array<std::uint32_t, 16> d8_to_d15{};
+#endif
 
   register_t& operator[](size_t p_size)
   {
     using register_file = std::array<register_t, 16>;
-    static_assert(sizeof(cortex_m_cpu) == sizeof(register_file));
+    static_assert(offsetof(cortex_m_cpu, pc) ==
+                  (sizeof(register_file) - sizeof(register_t)));
     static_assert(sizeof(std::uintptr_t) == sizeof(register_t));
 
     auto* file = reinterpret_cast<register_file*>(this);
