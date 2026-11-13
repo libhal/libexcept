@@ -91,6 +91,5 @@ void application()
   while (true) {
     // print out `global` in gdb to see its contents. Check to see if it matches
     // the expected value in error for that sub-object.
-    continue;
   }
 }

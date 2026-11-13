@@ -52,6 +52,5 @@ void application()
     //
     // Subtract end from start to see the time it took to throw and catch the
     // error.
-    continue;
   }
 }
