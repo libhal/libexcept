@@ -77,47 +77,51 @@ lu_t* get_lu(void* p_ptr)
 }
 
 /**
- * @brief Captures all registers CPU registers
+ * @brief Captures the registers a callee must preserve
  *
- * Registers captured are R4-R12 and SP. The LR (link) register is copied into
- * the PC register of the `except::cortex_m_cpu&`. The LR member variable of the
- * input parameter is left as is and will be updated as the unwinding proceeds.
- *
+ * Captures R4 to R11, SP and, with an FPU, D8 to D15. The LR (link) register is
+ * copied into the PC register of the `except::cortex_m_cpu&`. The LR member
+ * variable is left as is and will be updated as the unwinding proceeds. R12 is
+ * not captured: it isn't preserved across a call, so nothing reads it.
  */
 [[gnu::naked, gnu::noinline]] void capture_cpu_core(except::cortex_m_cpu&)
 {
+  // ARM calling conventions states that arguments are passed into R0-R3.
+  // The single reference parameter p_cpu_core is in R0.
   asm volatile(
-    // ARM calling conventions states that arguments are passed into R0-R3.
-    // The single reference parameter p_cpu_core is in R0.
-    //
+#if defined(__ARM_FP)
+    // Store D8 to D15 into `except::cortex_m_cpu::d8_to_d15`, the first
+    // member. R0 now points to `except::cortex_m_cpu::r0`.
+    "vstmia r0!, {d8-d15}\n"
+#endif
     // Add 16 bytes to the address within R0 to skip over R0-R3. We assume
     // `__cxa_throw` & `__cxa_rethrow` will never utilize the `sp = r[nnnn]`
     // instruction, meaning that the non-callee preserved registers can be
     // skipped. R0 now points to `except::cortex_m_cpu::r4`
     "add   r0, #16\n"
-    // Store R4 to R12 into `except::cortex_m_cpu::r4` to
-    // `except::cortex_m_cpu::r12`. The ! means, increment R<N> by the number of
-    // words stored. R0 now points at the `except::cortex_m_cpu&`'s SP register.
-    "stmia r0!, {r4-r12}\n"
-    // Store SP into [R0] (`except::cortex_m_cpu&`'s SP register), then move
-    // R0 to the PC register
-    "str sp, [r0], #8\n"
-    // Store LR into [R0] (`except::cortex_m_cpu&`'s PC register), then move R0
-    // past it
-    "str lr, [r0], #4\n"
-#if defined(__ARM_FP)
-    // Store D8 to D15 into `except::cortex_m_cpu::d8_to_d15`, right after PC.
-    // VSTM takes no offset, which is why the stores above move R0.
-    "vstmia r0, {d8-d15}\n"
-#endif
+    // Store R4 to R11 into `except::cortex_m_cpu::r4` to
+    // `except::cortex_m_cpu::r11`. The ! means, increment R<N> by the number of
+    // words stored. R0 now points at `except::cortex_m_cpu::ip`.
+    "stmia r0!, {r4-r11}\n"
+    // Store SP into `except::cortex_m_cpu::sp`, one word past IP
+    "str sp, [r0, #4]\n"
+    // Store LR into `except::cortex_m_cpu::pc`, three words past IP
+    "str lr, [r0, #12]\n"
     "bx lr\n"
     "\n");
 }
 
 #if defined(__ARM_FP)
-static_assert(offsetof(except::cortex_m_cpu, d8_to_d15) ==
+static_assert(offsetof(except::cortex_m_cpu, d8_to_d15) == 0);
+static_assert(offsetof(except::cortex_m_cpu, r0) ==
               (16 * sizeof(except::register_t)));
+#else
+static_assert(offsetof(except::cortex_m_cpu, r0) == 0);
 #endif
+static_assert((offsetof(except::cortex_m_cpu, sp) -
+               offsetof(except::cortex_m_cpu, ip)) == 4);
+static_assert((offsetof(except::cortex_m_cpu, pc) -
+               offsetof(except::cortex_m_cpu, ip)) == 12);
 
 struct index_less_than
 {
@@ -484,39 +488,49 @@ template<lsda_encoding encoding>
   return result;
 }
 
+/**
+ * @brief Loads the captured registers and jumps to the landing pad in PC
+ *
+ * Loads R0 and R1 (the exception object and the handler's filter), R4 to R11,
+ * SP and, with an FPU, D8 to D15. LR and R12 are not loaded: a landing pad is
+ * only entered from a call site, where neither is preserved, so nothing reads
+ * them.
+ */
 [[gnu::naked]] [[noreturn]] inline void restore_cpu_core(cortex_m_cpu&)
 {
+  // ARM calling conventions states that arguments are passed into R0-R3.
+  // The single reference parameter p_cpu_core is in R0.
   asm volatile(
-    "\n"
-    // ARM calling conventions states that arguments are passed into R0-R3.
-    // The single reference parameter p_cpu_core is in R0.
-    // We move the address to R2, since we need to set r0 and r1 to the
-    // exception error object's address and filter number respectively
-    "mov      r2, r0\n"
-    // Since our cortex_m_cpu object has the layout of 16x u32 values, we can
-    // just iterate through the struct like an array.
-    //
-    // This instruction loads R0 and R1 with the contents addressed by R2
-    "ldmia.w	r2, {r0, r1}\n"
-    // Move address by 16-bytes or 4x 32-bit words which skips past R0 to R3.
-    // R2 now points to R4 within the `cortex_m_cpu` object.
-    "add      r2, #16\n"
-    // Load R4 to R12 from `cortex_m_cpu` and increment the register's
-    // address. R2 now points to the SP register
-    "ldmia.w	r2!, {r4, r5, r6, r7, r8, r9, r10, r11, r12}\n"
 #if defined(__ARM_FP)
-    // Load D8 to D15 from `cortex_m_cpu::d8_to_d15`, 12 bytes past SP
-    "add      r3, r2, #12\n"
-    "vldmia   r3, {d8-d15}\n"
+    // R2 points to `cortex_m_cpu::r4`, past d8_to_d15 and R0-R3
+    "add      r2, r0, #80\n"
+    // Load D8 to D15 from `cortex_m_cpu::d8_to_d15`, the first member. R0 now
+    // points to `cortex_m_cpu::r0`.
+    "vldmia   r0!, {d8-d15}\n"
+#else
+    // R2 points to `cortex_m_cpu::r4`, past R0-R3
+    "add      r2, r0, #16\n"
 #endif
-    // Unfortunately SP cannot be in the list above, so we set it here
-    "ldr sp, [r2]\n"
-    // Load LR
-    "ldr lr, [r2, #4]\n"
-    // Load PC which will jump us to the landing pad
-    "ldr pc, [r2, #8]\n"
+    // Load R4 to R11 from `cortex_m_cpu`
+    "ldmia.w  r2, {r4, r5, r6, r7, r8, r9, r10, r11}\n"
+    // Load R0 and R1 with the exception object's address and the filter
+    // number. R0 is both the base and loaded, which is allowed without
+    // write-back.
+    "ldmia    r0, {r0, r1}\n"
+    // SP cannot be in an LDM list, so it is loaded on its own, 9 words past R4
+    "ldr      sp, [r2, #36]\n"
+    // Load PC, 11 words past R4, which jumps to the landing pad
+    "ldr      pc, [r2, #44]\n"
     "");
 }
+
+#if defined(__ARM_FP)
+static_assert(offsetof(cortex_m_cpu, r4) == 80);
+#else
+static_assert(offsetof(cortex_m_cpu, r4) == 16);
+#endif
+static_assert((offsetof(cortex_m_cpu, sp) - offsetof(cortex_m_cpu, r4)) == 36);
+static_assert((offsetof(cortex_m_cpu, pc) - offsetof(cortex_m_cpu, r4)) == 44);
 
 inline void skip_dwarf_info(std::uint8_t const** p_lsda)
 {

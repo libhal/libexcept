@@ -267,8 +267,24 @@ struct index_entry_t
   }
 };
 
+/**
+ * @brief The CPU registers the unwinder works on
+ *
+ * The order is chosen for capture_cpu_core() and restore_cpu_core():
+ *
+ * - d8 to d15 come first, so that one VSTM or VLDM with write-back leaves the
+ *   pointer at r0.
+ * - r0 to pc follow in register number order, so that the unwinder can index
+ *   them by register number with operator[], and STM and LDM can store and
+ *   load r4 to r11 in one instruction.
+ */
 struct cortex_m_cpu
 {
+#if defined(__ARM_FP)
+  /// d8 to d15, the floating-point registers a callee must preserve, as 16
+  /// words with each register's low word first.
+  std::array<std::uint32_t, 16> d8_to_d15{};
+#endif
   register_t r0;
   register_t r1;
   register_t r2;
@@ -285,21 +301,15 @@ struct cortex_m_cpu
   register_t sp;
   register_t lr;
   register_t pc;
-#if defined(__ARM_FP)
-  /// d8 to d15, the floating-point registers a callee must preserve, as 16
-  /// words with each register's low word first. capture_cpu_core() and
-  /// restore_cpu_core() store and load them right after pc.
-  std::array<std::uint32_t, 16> d8_to_d15{};
-#endif
 
   register_t& operator[](size_t p_size)
   {
     using register_file = std::array<register_t, 16>;
-    static_assert(offsetof(cortex_m_cpu, pc) ==
+    static_assert((offsetof(cortex_m_cpu, pc) - offsetof(cortex_m_cpu, r0)) ==
                   (sizeof(register_file) - sizeof(register_t)));
     static_assert(sizeof(std::uintptr_t) == sizeof(register_t));
 
-    auto* file = reinterpret_cast<register_file*>(this);
+    auto* file = reinterpret_cast<register_file*>(&r0);
     return (*file)[p_size];
   }
 };
