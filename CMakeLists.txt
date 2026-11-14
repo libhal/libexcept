@@ -46,7 +46,7 @@ add_library(libexcept::libexcept ALIAS libexcept)
 
 target_include_directories(libexcept PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(libexcept PUBLIC libhal::util)
-target_compile_features(libexcept PUBLIC cxx_std_20)
+target_compile_features(libexcept PUBLIC cxx_std_23)
 
 target_compile_options(libexcept PRIVATE
   -g -Werror -Wall -Wextra -Wshadow -fexceptions -fno-rtti
@@ -67,11 +67,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND NOT CMAKE_CROSSCOMPILI
 
   add_executable(test_main tests/main.test.cpp)
   target_link_libraries(test_main PRIVATE libexcept::libexcept Boost::ut)
-  target_compile_features(test_main PRIVATE cxx_std_20)
+  target_compile_features(test_main PRIVATE cxx_std_23)
 
   add_executable(test_new tests/new.test.cpp)
   target_link_libraries(test_new PRIVATE libexcept::libexcept Boost::ut)
-  target_compile_features(test_new PRIVATE cxx_std_20)
+  target_compile_features(test_new PRIVATE cxx_std_23)
 
   enable_testing()
   add_test(NAME test_main COMMAND test_main)

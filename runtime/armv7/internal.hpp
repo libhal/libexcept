@@ -84,22 +84,76 @@ constexpr std::uint32_t* to_absolute_address_ptr(void const* p_object)
   return std::bit_cast<std::uint32_t*>(to_absolute_address(p_object));
 }
 
+/// Byte positions of the unwind instructions in an entry whose header holds
+/// three of them: compact personality routine 0, and the generic model.
 namespace su16 {
-constexpr auto instruction0 = hal::bit_mask{ .position = 16, .width = 8 };
-constexpr auto instruction1 = hal::bit_mask{ .position = 8, .width = 8 };
-constexpr auto instruction2 = hal::bit_mask{ .position = 0, .width = 8 };
+constexpr auto instruction0 = hal::bit_mask::from<16, 23>();
+constexpr auto instruction1 = hal::bit_mask::from<8, 15>();
+constexpr auto instruction2 = hal::bit_mask::from<0, 7>();
 }  // namespace su16
 
+/// Byte positions in an entry whose header holds an extra word count and two
+/// instructions: compact personality routines 1 and 2. instruction2 to
+/// instruction5 are the first extra word's bytes, instruction6 and
+/// instruction7 the second's.
 namespace lu16_32 {
 constexpr auto length = hal::bit_mask::from<16, 23>();
-constexpr auto instruction0 = hal::bit_mask::from<15, 8>();
-constexpr auto instruction1 = hal::bit_mask::from<7, 0>();
-constexpr auto instruction2 = hal::bit_mask::from<31, 24>();
-constexpr auto instruction3 = hal::bit_mask::from<23, 16>();
-constexpr auto instruction4 = hal::bit_mask::from<15, 8>();
-constexpr auto instruction5 = hal::bit_mask::from<7, 0>();
+constexpr auto instruction0 = hal::bit_mask::from<8, 15>();
+constexpr auto instruction1 = hal::bit_mask::from<0, 7>();
+constexpr auto instruction2 = hal::bit_mask::from<24, 31>();
+constexpr auto instruction3 = hal::bit_mask::from<16, 23>();
+constexpr auto instruction4 = hal::bit_mask::from<8, 15>();
+constexpr auto instruction5 = hal::bit_mask::from<0, 7>();
 constexpr auto instruction6 = hal::bit_mask::from<24, 31>();
+constexpr auto instruction7 = hal::bit_mask::from<16, 23>();
 }  // namespace lu16_32
+
+/**
+ * @brief Returns true if a word is a compact model header
+ *
+ * An exception table entry's first word is either a compact model header, with
+ * bit 31 set, or the prel31 address of a generic model personality routine,
+ * such as `__gxx_personality_v0`, with bit 31 clear. The word after a generic
+ * routine's address holds its extra word count in bits 31:24, which never
+ * reaches 128, so bit 31 tells the two apart there too.
+ *
+ * @param p_header - the first word of a function's unwind instructions
+ * @return true if p_header is a compact model header
+ */
+[[gnu::always_inline]] [[nodiscard]] constexpr bool is_compact_model(
+  std::uint32_t p_header)
+{
+  constexpr auto compact_model = hal::bit_mask::from<31>();
+  return hal::bit_extract<compact_model>(p_header) == 1;
+}
+
+/**
+ * @brief Returns the number of words after the first that hold a function's
+ * unwind instructions
+ *
+ * - Compact model, personality routine 0: none.
+ * - Compact model, personality routines 1 and 2: bits 23:16.
+ * - Generic model: bits 31:24 of the word after the personality routine's
+ *   address.
+ *
+ * @param p_header - the first word of a function's unwind instructions
+ * @return the number of extra words
+ */
+[[gnu::always_inline]] [[nodiscard]] constexpr std::uint32_t unwind_word_count(
+  std::uint32_t p_header)
+{
+  constexpr auto personality_index = hal::bit_mask::from<24, 27>();
+  constexpr auto compact_count = hal::bit_mask::from<16, 23>();
+  constexpr auto generic_count = hal::bit_mask::from<24, 31>();
+
+  if (not is_compact_model(p_header)) {
+    return hal::bit_extract<generic_count>(p_header);
+  }
+  if (hal::bit_extract<personality_index>(p_header) == 0) {
+    return 0;
+  }
+  return hal::bit_extract<compact_count>(p_header);
+}
 
 struct function_t
 {
@@ -159,22 +213,23 @@ struct index_entry_t
     return to_absolute_address_ptr(&personality_offset);
   }
 
-  [[gnu::always_inline]] [[nodiscard]] static inline std::uint32_t const*
+  /**
+   * @brief Returns the pointer to a generic model entry's LSDA
+   *
+   * The LSDA follows the unwind instructions: the word after the personality
+   * routine's address, then the number of extra words in its bits 31:24.
+   *
+   * @param p_personality - pointer to the function's generic model entry
+   * within the exception table, which starts with the personality routine's
+   * address.
+   * @return std::uint32_t const* - pointer to the LSDA
+   */
+  [[gnu::always_inline]] [[nodiscard]] static constexpr std::uint32_t const*
   lsda_data(std::uint32_t const* p_personality)
   {
-    constexpr auto personality_type = hal::bit_mask::from<24, 27>();
-    // +1 to skip the prel31 offset to the personality function
+    constexpr auto generic_count = hal::bit_mask::from<24, 31>();
     auto const* header = p_personality + 1;
-    if (hal::bit_extract<personality_type>(*header) == 0x0) {
-      return header + 1;
-    }
-    if (hal::bit_extract<lu16_32::length>(*header) == 1) {
-      return header + 2;
-    }
-    if (hal::bit_extract<lu16_32::length>(*header) > 2) {
-      return header + 2;
-    }
-    return header + 3;
+    return (header + 1) + hal::bit_extract<generic_count>(*header);
   }
 
   /**
@@ -187,22 +242,23 @@ struct index_entry_t
    * @return std::uint32_t const* - pointer to the descriptor start area. Always
    * valid so long as p_personality is valid.
    */
-  [[gnu::always_inline]] inline static std::uint32_t const* descriptor_start(
+  [[gnu::always_inline]] static constexpr std::uint32_t const* descriptor_start(
     std::uint32_t const* p_personality)
   {
-    constexpr hal::bit_mask personality_type_mask{ .position = 24, .width = 4 };
-    auto const type = hal::bit_extract<personality_type_mask>(*p_personality);
-
-    // If the personality type is 0 (SU16), then the descriptor start is right
-    // after the first word.
-    if (type == 0) {
-      return p_personality + 1;
+    // A compact model entry starts with its unwind instructions. A generic
+    // model entry starts with the personality routine's address, and its
+    // unwind instructions follow it.
+    auto const* header = p_personality;
+    if (not is_compact_model(*header)) {
+      header++;
     }
-
-    // The limit for ARM exceptions instructions is 7. LD optimizes the ARM
-    // exception spec by removing the "word length" specifier allowing the
-    // instructions to fit in 2 words.
-    return p_personality + 2;
+    // Fast path for nearly every function: compact personality routine 0, or
+    // the generic model with no extra words.
+    constexpr std::uint32_t top_byte_without_model_bit = 0x7f00'0000;
+    if ((*header & top_byte_without_model_bit) == 0) {
+      return header + 1;
+    }
+    return (header + 1) + unwind_word_count(*header);
   }
 
   [[gnu::always_inline]] [[nodiscard]] function_t function() const

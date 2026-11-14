@@ -37,7 +37,7 @@ class except_conan(ConanFile):
 
     @property
     def _min_cppstd(self):
-        return "20"
+        return "23"
 
     @property
     def _is_arm_cortex(self):
@@ -95,6 +95,23 @@ class except_conan(ConanFile):
             "-Wl,--wrap=__cxa_begin_catch",
             "-Wl,--wrap=__cxa_end_cleanup",
             "-Wl,--wrap=_Unwind_Resume",
+            # __wrap___cxa_throw() expects an exception from
+            # __wrap___cxa_allocate_exception(), which readies the control
+            # block. Without these, the C++ runtime's allocator runs instead,
+            # and every throw terminates.
+            "-Wl,--wrap=__cxa_allocate_exception",
+            "-Wl,--wrap=__cxa_free_exception",
+            "-Wl,--wrap=__cxa_call_unexpected",
+            # The runtime reads the exception tables itself and never calls a
+            # personality routine. Every table entry still references one, so
+            # without these, the toolchain's personality routines and the
+            # unwinder they call are linked in unused (about 6 kB on a
+            # Cortex-M3). libunwind_wrappers.cpp provides the empty stubs.
+            "-Wl,--wrap=__gxx_personality_v0",
+            "-Wl,--wrap=__gcc_personality_v0",
+            "-Wl,--wrap=__aeabi_unwind_cpp_pr0",
+            "-Wl,--wrap=__aeabi_unwind_cpp_pr1",
+            "-Wl,--wrap=__aeabi_unwind_cpp_pr2",
         ])
 
         # CMakeLists.txt builds libexcept as an OBJECT library and installs
