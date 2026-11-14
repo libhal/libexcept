@@ -37,7 +37,7 @@ class except_conan(ConanFile):
 
     @property
     def _min_cppstd(self):
-        return "20"
+        return "23"
 
     @property
     def _is_arm_cortex(self):
