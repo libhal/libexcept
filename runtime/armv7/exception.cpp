@@ -296,7 +296,10 @@ std::uintptr_t near_point_guess_index(std::uintptr_t p_program_counter)
 template<size_t DecodedCount>
 struct decoded_uleb128_t
 {
-  std::array<std::uint32_t, DecodedCount> data{};
+  // Not zeroed: multi_read_uleb128() writes every element. Zeroing 20 bytes
+  // made GCC call memset at -Os, a byte at a time, for every frame with a
+  // cleanup.
+  std::array<std::uint32_t, DecodedCount> data;
   std::uint8_t const* last_read;
 };
 
@@ -304,23 +307,20 @@ template<size_t N>
 inline constexpr decoded_uleb128_t<N> multi_read_uleb128(
   std::uint8_t const* p_ptr)
 {
-  decoded_uleb128_t<N> result{};
-  auto iter = result.data.begin();
-  std::uint32_t shift_amount = 0;
+  decoded_uleb128_t<N> result;
 
-  // THIS IS WRONG! ULEB is LSB first then ends on MSB. This is big endian
-  while (iter != result.data.end()) {
-    std::uint8_t const uleb128 = *(p_ptr++);
-
-    *iter |= (uleb128 & 0x7F) << shift_amount;
-
-    if ((uleb128 & 0x80) == 0x00) {
-      iter++;
-      shift_amount = 0;
-      continue;
-    }
-
-    shift_amount += 7;
+  // Each value's bytes hold 7 bits each, least significant first, and every
+  // byte but the last has its top bit set.
+  for (auto& value : result.data) {
+    std::uint32_t decoded = 0;
+    std::uint32_t shift_amount = 0;
+    std::uint8_t uleb128 = 0;
+    do {
+      uleb128 = *(p_ptr++);
+      decoded |= (uleb128 & 0x7FU) << shift_amount;
+      shift_amount += 7;
+    } while ((uleb128 & 0x80U) != 0);
+    value = decoded;
   }
 
   result.last_read = p_ptr;
