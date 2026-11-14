@@ -77,35 +77,51 @@ lu_t* get_lu(void* p_ptr)
 }
 
 /**
- * @brief Captures all registers CPU registers
+ * @brief Captures the registers a callee must preserve
  *
- * Registers captured are R4-R12 and SP. The LR (link) register is copied into
- * the PC register of the `except::cortex_m_cpu&`. The LR member variable of the
- * input parameter is left as is and will be updated as the unwinding proceeds.
- *
+ * Captures R4 to R11, SP and, with an FPU, D8 to D15. The LR (link) register is
+ * copied into the PC register of the `except::cortex_m_cpu&`. The LR member
+ * variable is left as is and will be updated as the unwinding proceeds. R12 is
+ * not captured: it isn't preserved across a call, so nothing reads it.
  */
 [[gnu::naked, gnu::noinline]] void capture_cpu_core(except::cortex_m_cpu&)
 {
+  // ARM calling conventions states that arguments are passed into R0-R3.
+  // The single reference parameter p_cpu_core is in R0.
   asm volatile(
-    // ARM calling conventions states that arguments are passed into R0-R3.
-    // The single reference parameter p_cpu_core is in R0.
-    //
+#if defined(__ARM_FP)
+    // Store D8 to D15 into `except::cortex_m_cpu::d8_to_d15`, the first
+    // member. R0 now points to `except::cortex_m_cpu::r0`.
+    "vstmia r0!, {d8-d15}\n"
+#endif
     // Add 16 bytes to the address within R0 to skip over R0-R3. We assume
     // `__cxa_throw` & `__cxa_rethrow` will never utilize the `sp = r[nnnn]`
     // instruction, meaning that the non-callee preserved registers can be
     // skipped. R0 now points to `except::cortex_m_cpu::r4`
     "add   r0, #16\n"
-    // Store R4 to R12 into `except::cortex_m_cpu::r4` to `except::cortex_m_cpu::r12`.
-    // The ! means, increment R<N> by the number of words stored. R0 now points
-    // at the `except::cortex_m_cpu&`'s SP register.
-    "stmia r0!, {r4-r12}\n"
-    // Store SP into [R0] (`except::cortex_m_cpu&`'s SP register)
-    "str sp, [r0]\n"
-    // Store LR into [R0 + 8] (`except::cortex_m_cpu&`'s PC register)
-    "str lr, [r0, #8]\n"
+    // Store R4 to R11 into `except::cortex_m_cpu::r4` to
+    // `except::cortex_m_cpu::r11`. The ! means, increment R<N> by the number of
+    // words stored. R0 now points at `except::cortex_m_cpu::ip`.
+    "stmia r0!, {r4-r11}\n"
+    // Store SP into `except::cortex_m_cpu::sp`, one word past IP
+    "str sp, [r0, #4]\n"
+    // Store LR into `except::cortex_m_cpu::pc`, three words past IP
+    "str lr, [r0, #12]\n"
     "bx lr\n"
     "\n");
 }
+
+#if defined(__ARM_FP)
+static_assert(offsetof(except::cortex_m_cpu, d8_to_d15) == 0);
+static_assert(offsetof(except::cortex_m_cpu, r0) ==
+              (16 * sizeof(except::register_t)));
+#else
+static_assert(offsetof(except::cortex_m_cpu, r0) == 0);
+#endif
+static_assert((offsetof(except::cortex_m_cpu, sp) -
+               offsetof(except::cortex_m_cpu, ip)) == 4);
+static_assert((offsetof(except::cortex_m_cpu, pc) -
+               offsetof(except::cortex_m_cpu, ip)) == 12);
 
 struct index_less_than
 {
@@ -472,34 +488,49 @@ template<lsda_encoding encoding>
   return result;
 }
 
+/**
+ * @brief Loads the captured registers and jumps to the landing pad in PC
+ *
+ * Loads R0 and R1 (the exception object and the handler's filter), R4 to R11,
+ * SP and, with an FPU, D8 to D15. LR and R12 are not loaded: a landing pad is
+ * only entered from a call site, where neither is preserved, so nothing reads
+ * them.
+ */
 [[gnu::naked]] [[noreturn]] inline void restore_cpu_core(cortex_m_cpu&)
 {
+  // ARM calling conventions states that arguments are passed into R0-R3.
+  // The single reference parameter p_cpu_core is in R0.
   asm volatile(
-    "\n"
-    // ARM calling conventions states that arguments are passed into R0-R3.
-    // The single reference parameter p_cpu_core is in R0.
-    // We move the address to R2, since we need to set r0 and r1 to the
-    // exception error object's address and filter number respectively
-    "mov      r2, r0\n"
-    // Since our cortex_m_cpu object has the layout of 16x u32 values, we can
-    // just iterate through the struct like an array.
-    //
-    // This instruction loads R0 and R1 with the contents addressed by R2
-    "ldmia.w	r2, {r0, r1}\n"
-    // Move address by 16-bytes or 4x 32-bit words which skips past R0 to R3.
-    // R2 now points to R4 within the `cortex_m_cpu` object.
-    "add      r2, #16\n"
-    // Load R4 to R12 from `cortex_m_cpu` and increment the register's
-    // address. R2 now points to the SP register
-    "ldmia.w	r2!, {r4, r5, r6, r7, r8, r9, r10, r11, r12}\n"
-    // Unfortunately SP cannot be in the list above, so we set it here
-    "ldr sp, [r2]\n"
-    // Load LR
-    "ldr lr, [r2, #4]\n"
-    // Load PC which will jump us to the landing pad
-    "ldr pc, [r2, #8]\n"
+#if defined(__ARM_FP)
+    // R2 points to `cortex_m_cpu::r4`, past d8_to_d15 and R0-R3
+    "add      r2, r0, #80\n"
+    // Load D8 to D15 from `cortex_m_cpu::d8_to_d15`, the first member. R0 now
+    // points to `cortex_m_cpu::r0`.
+    "vldmia   r0!, {d8-d15}\n"
+#else
+    // R2 points to `cortex_m_cpu::r4`, past R0-R3
+    "add      r2, r0, #16\n"
+#endif
+    // Load R4 to R11 from `cortex_m_cpu`
+    "ldmia.w  r2, {r4, r5, r6, r7, r8, r9, r10, r11}\n"
+    // Load R0 and R1 with the exception object's address and the filter
+    // number. R0 is both the base and loaded, which is allowed without
+    // write-back.
+    "ldmia    r0, {r0, r1}\n"
+    // SP cannot be in an LDM list, so it is loaded on its own, 9 words past R4
+    "ldr      sp, [r2, #36]\n"
+    // Load PC, 11 words past R4, which jumps to the landing pad
+    "ldr      pc, [r2, #44]\n"
     "");
 }
+
+#if defined(__ARM_FP)
+static_assert(offsetof(cortex_m_cpu, r4) == 80);
+#else
+static_assert(offsetof(cortex_m_cpu, r4) == 16);
+#endif
+static_assert((offsetof(cortex_m_cpu, sp) - offsetof(cortex_m_cpu, r4)) == 36);
+static_assert((offsetof(cortex_m_cpu, pc) - offsetof(cortex_m_cpu, r4)) == 44);
 
 inline void skip_dwarf_info(std::uint8_t const** p_lsda)
 {
@@ -847,6 +878,38 @@ inline std::uintptr_t const* pop_register_range(std::uintptr_t const* sp_ptr,
   return sp_ptr + PopCount + 1 + unsigned{ PopLinkRegister == pop_lr::do_it };
 }
 
+#if defined(__ARM_FP)
+/**
+ * @brief Pops consecutive double-precision registers off the virtual stack
+ *
+ * Each register is two words, lowest-numbered register at the lowest address.
+ * Only d8 to d15 are kept, the registers a callee must preserve. d0 to d7 are
+ * not preserved across a call, and Cortex-M floating-point units have no d16
+ * to d31, so their words are skipped.
+ *
+ * @param p_sp - the virtual stack pointer
+ * @param p_first - the number of the first register
+ * @param p_count - the number of registers
+ * @param p_cpu - receives d8 to d15
+ * @return std::uintptr_t const* - the virtual stack pointer past the registers
+ */
+inline std::uintptr_t const* pop_vfp_registers(std::uintptr_t const* p_sp,
+                                               std::uint32_t p_first,
+                                               std::uint32_t p_count,
+                                               cortex_m_cpu& p_cpu)
+{
+  for (std::uint32_t index = 0; index < p_count; index++) {
+    auto const number = p_first + index;
+    if ((number >= 8) and (number <= 15)) {
+      auto const word = 2 * (number - 8);
+      p_cpu.d8_to_d15[word] = p_sp[2 * index];
+      p_cpu.d8_to_d15[word + 1] = p_sp[(2 * index) + 1];
+    }
+  }
+  return p_sp + (2 * p_count);
+}
+#endif
+
 void unwind_frame(instructions_t const& p_instructions, cortex_m_cpu& p_cpu)
 {
 #if defined(__clang__)
@@ -1060,9 +1123,12 @@ void unwind_frame(instructions_t const& p_instructions, cortex_m_cpu& p_cpu)
     // Subtract VSP using uleb128
     &&subtract_vsp_using_uleb128,  // 10110010 [178]
 
+#if defined(__ARM_FP)
     // Pop VFP double-precision registers
-    // TODO(#27): Add support for this
+    &&pop_vfp_registers_saved_by_fstmfdx,  // 10110011 [179]
+#else
     &&reserved_or_spare_thus_terminate,  // 10110011 [179]
+#endif
 
     // Pop Return Address Authentication Code pseudo-register
     // TODO(#28): Add support for this
@@ -1076,8 +1142,17 @@ void unwind_frame(instructions_t const& p_instructions, cortex_m_cpu& p_cpu)
     &&reserved_or_spare_thus_terminate,  // 10110110 [182]
     &&reserved_or_spare_thus_terminate,  // 10110111 [183]
 
+#if defined(__ARM_FP)
     // Pop VFP double-precision registers D[8]-D[8+nnn] saved 10111nnn
-    // TODO(#30): Add support for this
+    &&pop_vfp_d8_and_up_saved_by_fstmfdx,  // 10111'000 [184]
+    &&pop_vfp_d8_and_up_saved_by_fstmfdx,  // 10111'001 [185]
+    &&pop_vfp_d8_and_up_saved_by_fstmfdx,  // 10111'010 [186]
+    &&pop_vfp_d8_and_up_saved_by_fstmfdx,  // 10111'011 [187]
+    &&pop_vfp_d8_and_up_saved_by_fstmfdx,  // 10111'100 [188]
+    &&pop_vfp_d8_and_up_saved_by_fstmfdx,  // 10111'101 [189]
+    &&pop_vfp_d8_and_up_saved_by_fstmfdx,  // 10111'110 [190]
+    &&pop_vfp_d8_and_up_saved_by_fstmfdx,  // 10111'111 [191]
+#else
     &&reserved_or_spare_thus_terminate,  // 10111'000 [184]
     &&reserved_or_spare_thus_terminate,  // 10111'001 [185]
     &&reserved_or_spare_thus_terminate,  // 10111'010 [186]
@@ -1086,6 +1161,7 @@ void unwind_frame(instructions_t const& p_instructions, cortex_m_cpu& p_cpu)
     &&reserved_or_spare_thus_terminate,  // 10111'101 [189]
     &&reserved_or_spare_thus_terminate,  // 10111'110 [190]
     &&reserved_or_spare_thus_terminate,  // 10111'111 [191]
+#endif
 
     // Intel Wireless MMX pop wR[10]-wR[10+nnn] 11000nnn
     // NOTE: We will probably never support these. No modern ARM device is still
@@ -1106,15 +1182,21 @@ void unwind_frame(instructions_t const& p_instructions, cortex_m_cpu& p_cpu)
     // Spare (11000111)
     &&reserved_or_spare_thus_terminate,  // 11000'111 [199]
 
+#if defined(__ARM_FP)
     // Pop VFP double precision registers D[ssss]-D[ssss+cccc] saved (as if) by
     // VPUSH (11001000)
-    // TODO(#31): Add support for this
+    &&pop_vfp_d16_and_up_saved_by_vpush,  // 11001000 [200]
+#else
     &&reserved_or_spare_thus_terminate,  // 11001000 [200]
+#endif
 
+#if defined(__ARM_FP)
     // Pop VFP double precision registers D[ssss]-D[ssss+cccc] saved (as if) by
     // VPUSH (11001001)
-    // TODO(#32): Add support for this
+    &&pop_vfp_registers_saved_by_vpush,  // 11001001 [201]
+#else
     &&reserved_or_spare_thus_terminate,  // 11001001 [201]
+#endif
 
     // Spare (yyy != 000, 001) 11001yyy
     &&reserved_or_spare_thus_terminate,  // 11001'010 [202]
@@ -1124,8 +1206,17 @@ void unwind_frame(instructions_t const& p_instructions, cortex_m_cpu& p_cpu)
     &&reserved_or_spare_thus_terminate,  // 11001'110 [206]
     &&reserved_or_spare_thus_terminate,  // 11001'111 [207]
 
+#if defined(__ARM_FP)
     // Pop VFP double-precision registers D[8]-D[8+nnn] saved by VPUSH 11010nnn
-    // TODO(#33): Add support for this
+    &&pop_vfp_d8_and_up_saved_by_vpush,  // 11010'000 [208]
+    &&pop_vfp_d8_and_up_saved_by_vpush,  // 11010'001 [209]
+    &&pop_vfp_d8_and_up_saved_by_vpush,  // 11010'010 [210]
+    &&pop_vfp_d8_and_up_saved_by_vpush,  // 11010'011 [211]
+    &&pop_vfp_d8_and_up_saved_by_vpush,  // 11010'100 [212]
+    &&pop_vfp_d8_and_up_saved_by_vpush,  // 11010'101 [213]
+    &&pop_vfp_d8_and_up_saved_by_vpush,  // 11010'110 [214]
+    &&pop_vfp_d8_and_up_saved_by_vpush,  // 11010'111 [215]
+#else
     &&reserved_or_spare_thus_terminate,  // 11010'000 [208]
     &&reserved_or_spare_thus_terminate,  // 11010'001 [209]
     &&reserved_or_spare_thus_terminate,  // 11010'010 [210]
@@ -1134,6 +1225,7 @@ void unwind_frame(instructions_t const& p_instructions, cortex_m_cpu& p_cpu)
     &&reserved_or_spare_thus_terminate,  // 11010'101 [213]
     &&reserved_or_spare_thus_terminate,  // 11010'110 [214]
     &&reserved_or_spare_thus_terminate,  // 11010'111 [215]
+#endif
 
     // Spare (xxx != 000, 001, 010) 11xxxyyy
 
@@ -1293,6 +1385,51 @@ void unwind_frame(instructions_t const& p_instructions, cortex_m_cpu& p_cpu)
 
     instruction_ptr++;
     continue;
+
+#if defined(__ARM_FP)
+  // +=========================================================================+
+  // |                Pop VFP double-precision registers                       |
+  // +=========================================================================+
+  // FSTMFDX saves one more word than the registers, so those forms skip it.
+  // Without a floating-point unit, these instructions can't appear, and their
+  // table entries terminate.
+  pop_vfp_registers_saved_by_vpush:
+    // sssscccc: D[ssss] to D[ssss+cccc]
+    sp_ptr = pop_vfp_registers(
+      sp_ptr, *instruction_ptr >> 4U, (*instruction_ptr & 0xFU) + 1U, p_cpu);
+    instruction_ptr++;
+    continue;
+
+  pop_vfp_d16_and_up_saved_by_vpush:
+    // sssscccc: D[16+ssss] to D[16+ssss+cccc]
+    sp_ptr = pop_vfp_registers(sp_ptr,
+                               16U + (*instruction_ptr >> 4U),
+                               (*instruction_ptr & 0xFU) + 1U,
+                               p_cpu);
+    instruction_ptr++;
+    continue;
+
+  pop_vfp_d8_and_up_saved_by_vpush:
+    // 11010nnn: D[8] to D[8+nnn]
+    sp_ptr = pop_vfp_registers(
+      sp_ptr, 8U, (*(instruction_ptr - 1U) & 0b111U) + 1U, p_cpu);
+    continue;
+
+  pop_vfp_registers_saved_by_fstmfdx:
+    // sssscccc: D[ssss] to D[ssss+cccc]
+    sp_ptr = pop_vfp_registers(
+      sp_ptr, *instruction_ptr >> 4U, (*instruction_ptr & 0xFU) + 1U, p_cpu);
+    sp_ptr++;
+    instruction_ptr++;
+    continue;
+
+  pop_vfp_d8_and_up_saved_by_fstmfdx:
+    // 10111nnn: D[8] to D[8+nnn]
+    sp_ptr = pop_vfp_registers(
+      sp_ptr, 8U, (*(instruction_ptr - 1U) & 0b111U) + 1U, p_cpu);
+    sp_ptr++;
+    continue;
+#endif
 
   // +=========================================================================+
   // |                            VSP = R[nnnn]                                |
