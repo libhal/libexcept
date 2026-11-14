@@ -99,13 +99,15 @@ lu_t* get_lu(void* p_ptr)
     // `except::cortex_m_cpu::r12`. The ! means, increment R<N> by the number of
     // words stored. R0 now points at the `except::cortex_m_cpu&`'s SP register.
     "stmia r0!, {r4-r12}\n"
-    // Store SP into [R0] (`except::cortex_m_cpu&`'s SP register)
-    "str sp, [r0]\n"
-    // Store LR into [R0 + 8] (`except::cortex_m_cpu&`'s PC register)
-    "str lr, [r0, #8]\n"
+    // Store SP into [R0] (`except::cortex_m_cpu&`'s SP register), then move
+    // R0 to the PC register
+    "str sp, [r0], #8\n"
+    // Store LR into [R0] (`except::cortex_m_cpu&`'s PC register), then move R0
+    // past it
+    "str lr, [r0], #4\n"
 #if defined(__ARM_FP)
-    // Store D8 to D15 into `except::cortex_m_cpu::d8_to_d15`, right after PC
-    "add r0, #12\n"
+    // Store D8 to D15 into `except::cortex_m_cpu::d8_to_d15`, right after PC.
+    // VSTM takes no offset, which is why the stores above move R0.
     "vstmia r0, {d8-d15}\n"
 #endif
     "bx lr\n"
