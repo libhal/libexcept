@@ -192,7 +192,8 @@ struct index_entry_t
   /**
    * @brief Returns the pointer to a generic model entry's LSDA
    *
-   * The LSDA follows the unwind instructions.
+   * The LSDA follows the unwind instructions: the word after the personality
+   * routine's address, then the number of extra words in its bits 31:24.
    *
    * @param p_personality - pointer to the function's generic model entry
    * within the exception table, which starts with the personality routine's
@@ -202,7 +203,9 @@ struct index_entry_t
   [[gnu::always_inline]] [[nodiscard]] static constexpr std::uint32_t const*
   lsda_data(std::uint32_t const* p_personality)
   {
-    return descriptor_start(p_personality);
+    constexpr auto generic_count = hal::bit_mask::from<24, 31>();
+    auto const* header = p_personality + 1;
+    return (header + 1) + hal::bit_extract<generic_count>(*header);
   }
 
   /**
@@ -224,6 +227,12 @@ struct index_entry_t
     auto const* header = p_personality;
     if (not is_compact_model(*header)) {
       header++;
+    }
+    // Fast path for nearly every function: compact personality routine 0, or
+    // the generic model with no extra words.
+    constexpr std::uint32_t top_byte_without_model_bit = 0x7f00'0000;
+    if ((*header & top_byte_without_model_bit) == 0) {
+      return header + 1;
     }
     return (header + 1) + unwind_word_count(*header);
   }

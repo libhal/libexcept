@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <exception>
 #include <span>
+#include <type_traits>
 #include <typeinfo>
 
 #include <libexcept/allocator.hpp>
@@ -1764,6 +1765,31 @@ consteval instructions_t spare_instruction()
 }
 
 /**
+ * @brief Builds an instructions_t from its two words
+ *
+ * Stores the words straight into the result. Building the array with
+ * std::bit_cast makes GCC put it on the stack and copy it.
+ *
+ * @param p_first - the first four instructions, in memory order
+ * @param p_second - the next four instructions, in memory order
+ * @return instructions_t - the instructions
+ */
+[[gnu::always_inline]]
+constexpr instructions_t from_words(std::uint32_t p_first,
+                                    std::uint32_t p_second)
+{
+  instructions_t result;
+  if (std::is_constant_evaluated()) {
+    result.data = std::bit_cast<std::array<std::uint8_t, 8>>(
+      std::array<std::uint32_t, 2>{ p_first, p_second });
+  } else {
+    __builtin_memcpy(result.data.data(), &p_first, sizeof(p_first));
+    __builtin_memcpy(result.data.data() + 4, &p_second, sizeof(p_second));
+  }
+  return result;
+}
+
+/**
  * @brief Decodes a function's unwind instructions from its exception table
  * entry
  *
@@ -1797,6 +1823,16 @@ constexpr instructions_t personality_to_unwind_instructions(
   static_assert(std::endian::native == std::endian::little);
 
   std::uint32_t const header = p_handler_data[0];
+
+  // Fast path for nearly every function: compact personality routine 0
+  // (top byte 0x80) or the generic model with no extra words (top byte 0x00).
+  // Both hold up to three instructions in the header's low bytes.
+  constexpr std::uint32_t top_byte_without_model_bit = 0x7f00'0000;
+  if ((header & top_byte_without_model_bit) == 0) {
+    return from_words(__builtin_bswap32((header << 8) | arm_ehabi::finish),
+                      finish_word);
+  }
+
   // Shift that drops the header's non-instruction bytes: the generic model's
   // word count, or a compact model's bit 31, index and word count.
   std::uint32_t header_shift = 8;
@@ -1827,11 +1863,7 @@ constexpr instructions_t personality_to_unwind_instructions(
     return spare_instruction();
   }
 
-  return instructions_t{
-    .data =
-      std::bit_cast<std::array<std::uint8_t, 8>>(std::array<std::uint32_t, 2>{
-        __builtin_bswap32(high), __builtin_bswap32(low) }),
-  };
+  return from_words(__builtin_bswap32(high), __builtin_bswap32(low));
 }
 
 // Compile-time checks of the decode and of where the LSDA starts (#35). The
