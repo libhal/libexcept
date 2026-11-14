@@ -22,7 +22,6 @@
 #include <cstdlib>
 #include <exception>
 #include <span>
-#include <type_traits>
 #include <typeinfo>
 
 #include <libexcept/allocator.hpp>
@@ -1765,49 +1764,23 @@ consteval instructions_t spare_instruction()
 }
 
 /**
- * @brief Builds an instructions_t from its two words
- *
- * Stores the words straight into the result. Building the array with
- * std::bit_cast makes GCC put it on the stack and copy it.
- *
- * @param p_first - the first four instructions, in memory order
- * @param p_second - the next four instructions, in memory order
- * @return instructions_t - the instructions
- */
-[[gnu::always_inline]]
-constexpr instructions_t from_words(std::uint32_t p_first,
-                                    std::uint32_t p_second)
-{
-  instructions_t result;
-  if (std::is_constant_evaluated()) {
-    result.data = std::bit_cast<std::array<std::uint8_t, 8>>(
-      std::array<std::uint32_t, 2>{ p_first, p_second });
-  } else {
-    __builtin_memcpy(result.data.data(), &p_first, sizeof(p_first));
-    __builtin_memcpy(result.data.data() + 4, &p_second, sizeof(p_second));
-  }
-  return result;
-}
-
-/**
  * @brief Decodes a function's unwind instructions from its exception table
  * entry
  *
- * The instructions are the header's low bytes, then four from each extra word,
- * most significant byte first. Personality routines 1 and 2 keep the extra
- * word count in the header's bits 23:16, so only its low two bytes are
- * instructions. Personality routine 0 and the generic model use the low three.
- * The bytes after the last instruction, up to the end of the last word, are
- * finish.
+ * An entry's instructions are the header's low bytes, then four from each
+ * extra word, most significant byte first, and the bytes after the last
+ * instruction, up to the end of the last word, are finish. The header holds:
  *
- * instructions_t holds 7 instructions. A function with more, or with an
- * unknown personality routine, gets the spare instruction, which terminates,
- * rather than unwinding with some of its instructions missing.
+ * - Compact model, personality routine 0 (top byte 0x80): three instructions.
+ * - Compact model, routines 1 and 2 (top byte 0x81, 0x82): the extra word
+ *   count in bits 23:16, then two instructions.
+ * - Generic model (top byte below 0x80): the extra word count in bits 31:24,
+ *   then three instructions.
  *
- * This is on the path of every frame unwound, so it works on whole words: the
- * header and the first two extra words are shifted into place as two
- * big-endian words and byte-swapped into the instruction array. There are no
- * per-byte loads, shifts or stores.
+ * Each layout is read out field by field below. instructions_t holds 7
+ * instructions. A function with more, or with an unknown personality routine,
+ * gets the spare instruction, which terminates, rather than unwinding with
+ * some of its instructions missing.
  *
  * @param p_handler_data - the first word of the unwind instructions: the
  * index entry's second word, a compact model entry, or the word after a
@@ -1819,51 +1792,76 @@ constexpr instructions_t personality_to_unwind_instructions(
   std::uint32_t const* p_handler_data)
 {
   constexpr auto personality_index = hal::bit_mask::from<24, 27>();
-  constexpr std::uint32_t finish_word = arm_ehabi::finish * 0x0101'0101U;
-  static_assert(std::endian::native == std::endian::little);
+  constexpr auto index_and_count = hal::bit_mask::from<24, 30>();
+  constexpr auto generic_count = hal::bit_mask::from<24, 31>();
 
+  // Every instruction starts out as finish. One object, filled in place and
+  // returned once: with several return statements GCC builds the result in a
+  // temporary and copies it.
+  instructions_t unwind;
   std::uint32_t const header = p_handler_data[0];
 
-  // Fast path for nearly every function: compact personality routine 0
-  // (top byte 0x80) or the generic model with no extra words (top byte 0x00).
-  // Both hold up to three instructions in the header's low bytes.
-  constexpr std::uint32_t top_byte_without_model_bit = 0x7f00'0000;
-  if ((header & top_byte_without_model_bit) == 0) {
-    return from_words(__builtin_bswap32((header << 8) | arm_ehabi::finish),
-                      finish_word);
-  }
-
-  // Shift that drops the header's non-instruction bytes: the generic model's
-  // word count, or a compact model's bit 31, index and word count.
-  std::uint32_t header_shift = 8;
-  if (is_compact_model(header)) {
-    auto const index = hal::bit_extract<personality_index>(header);
-    if (index > 2) {
-      return spare_instruction();
+  if (hal::bit_extract<index_and_count>(header) == 0) {
+    // Nearly every function: compact personality routine 0, or the generic
+    // model with no extra words. Both keep three instructions in the header.
+    unwind.data[0] = hal::bit_extract<su16::instruction0>(header);
+    unwind.data[1] = hal::bit_extract<su16::instruction1>(header);
+    unwind.data[2] = hal::bit_extract<su16::instruction2>(header);
+  } else if (is_compact_model(header)) {
+    // Compact personality routines 1 and 2: two instructions in the header,
+    // then the extra words.
+    std::uint32_t const first_word = p_handler_data[1];
+    auto const length = hal::bit_extract<lu16_32::length>(header);
+    if (hal::bit_extract<personality_index>(header) > 2) {
+      unwind = spare_instruction();
+    } else if (length == 0) {
+      unwind.data[0] = hal::bit_extract<lu16_32::instruction0>(header);
+      unwind.data[1] = hal::bit_extract<lu16_32::instruction1>(header);
+    } else if (length == 1) {
+      unwind.data[0] = hal::bit_extract<lu16_32::instruction0>(header);
+      unwind.data[1] = hal::bit_extract<lu16_32::instruction1>(header);
+      unwind.data[2] = hal::bit_extract<lu16_32::instruction2>(first_word);
+      unwind.data[3] = hal::bit_extract<lu16_32::instruction3>(first_word);
+      unwind.data[4] = hal::bit_extract<lu16_32::instruction4>(first_word);
+      unwind.data[5] = hal::bit_extract<lu16_32::instruction5>(first_word);
+    } else {
+      // Two or more extra words hold at least ten bytes. The 8th must be
+      // finish, or the function has more than 7 instructions.
+      std::uint32_t const last_word = p_handler_data[2];
+      if (hal::bit_extract<lu16_32::instruction7>(last_word) ==
+          arm_ehabi::finish) {
+        unwind.data[0] = hal::bit_extract<lu16_32::instruction0>(header);
+        unwind.data[1] = hal::bit_extract<lu16_32::instruction1>(header);
+        unwind.data[2] = hal::bit_extract<lu16_32::instruction2>(first_word);
+        unwind.data[3] = hal::bit_extract<lu16_32::instruction3>(first_word);
+        unwind.data[4] = hal::bit_extract<lu16_32::instruction4>(first_word);
+        unwind.data[5] = hal::bit_extract<lu16_32::instruction5>(first_word);
+        unwind.data[6] = hal::bit_extract<lu16_32::instruction6>(last_word);
+      } else {
+        unwind = spare_instruction();
+      }
     }
-    if (index != 0) {
-      header_shift = 16;
+  } else {
+    // Generic model with extra words: three instructions in the header, then
+    // four in the first extra word. A second extra word may only hold
+    // padding; otherwise the function has more than 7 instructions.
+    std::uint32_t const first_word = p_handler_data[1];
+    bool const fits = (hal::bit_extract<generic_count>(header) == 1) or
+                      (hal::bit_extract<lu16_32::instruction2>(
+                         p_handler_data[2]) == arm_ehabi::finish);
+    if (fits) {
+      unwind.data[0] = hal::bit_extract<su16::instruction0>(header);
+      unwind.data[1] = hal::bit_extract<su16::instruction1>(header);
+      unwind.data[2] = hal::bit_extract<su16::instruction2>(header);
+      unwind.data[3] = hal::bit_extract<lu16_32::instruction2>(first_word);
+      unwind.data[4] = hal::bit_extract<lu16_32::instruction3>(first_word);
+      unwind.data[5] = hal::bit_extract<lu16_32::instruction4>(first_word);
+      unwind.data[6] = hal::bit_extract<lu16_32::instruction5>(first_word);
+    } else {
+      unwind = spare_instruction();
     }
   }
-
-  // Extra words past the second can only hold finish padding for a function
-  // with 7 or fewer instructions, so they are never read.
-  auto const word_count = unwind_word_count(header);
-  auto const word1 = (word_count >= 1) ? p_handler_data[1] : finish_word;
-  auto const word2 = (word_count >= 2) ? p_handler_data[2] : finish_word;
-
-  // The first and second four instructions, most significant byte first.
-  auto const word_shift = 32 - header_shift;
-  std::uint32_t const high = (header << header_shift) | (word1 >> word_shift);
-  std::uint32_t const low = (word1 << header_shift) | (word2 >> word_shift);
-
-  // The 8th byte must be finish. If it is an instruction, the function has
-  // more than 7 of them.
-  if (static_cast<std::uint8_t>(low) != arm_ehabi::finish) {
-    return spare_instruction();
-  }
-
-  return from_words(__builtin_bswap32(high), __builtin_bswap32(low));
+  return unwind;
 }
 
 // Compile-time checks of the decode and of where the LSDA starts (#35). The

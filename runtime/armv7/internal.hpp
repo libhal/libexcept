@@ -84,6 +84,30 @@ constexpr std::uint32_t* to_absolute_address_ptr(void const* p_object)
   return std::bit_cast<std::uint32_t*>(to_absolute_address(p_object));
 }
 
+/// Byte positions of the unwind instructions in an entry whose header holds
+/// three of them: compact personality routine 0, and the generic model.
+namespace su16 {
+constexpr auto instruction0 = hal::bit_mask::from<16, 23>();
+constexpr auto instruction1 = hal::bit_mask::from<8, 15>();
+constexpr auto instruction2 = hal::bit_mask::from<0, 7>();
+}  // namespace su16
+
+/// Byte positions in an entry whose header holds an extra word count and two
+/// instructions: compact personality routines 1 and 2. instruction2 to
+/// instruction5 are the first extra word's bytes, instruction6 and
+/// instruction7 the second's.
+namespace lu16_32 {
+constexpr auto length = hal::bit_mask::from<16, 23>();
+constexpr auto instruction0 = hal::bit_mask::from<8, 15>();
+constexpr auto instruction1 = hal::bit_mask::from<0, 7>();
+constexpr auto instruction2 = hal::bit_mask::from<24, 31>();
+constexpr auto instruction3 = hal::bit_mask::from<16, 23>();
+constexpr auto instruction4 = hal::bit_mask::from<8, 15>();
+constexpr auto instruction5 = hal::bit_mask::from<0, 7>();
+constexpr auto instruction6 = hal::bit_mask::from<24, 31>();
+constexpr auto instruction7 = hal::bit_mask::from<16, 23>();
+}  // namespace lu16_32
+
 /**
  * @brief Returns true if a word is a compact model header
  *
