@@ -53,18 +53,6 @@ extern "C"
 
 namespace except {
 
-struct instructions_t
-{
-  // Why the length of 8? ARM unwind instructions are capped at 7 bytes for all
-  // possible functions. The 8th instruction will always be the finish byte.
-  // This allows the unwinder to iterate through the whole list without needing
-  // to compare a length variable which would decrease performance.
-  std::array<std::uint8_t, 8> data{
-    arm_ehabi::finish, arm_ehabi::finish, arm_ehabi::finish, arm_ehabi::finish,
-    arm_ehabi::finish, arm_ehabi::finish, arm_ehabi::finish, arm_ehabi::finish,
-  };
-};
-
 exception_control_block control_block{};
 
 su16_t* get_su16(void* p_ptr)

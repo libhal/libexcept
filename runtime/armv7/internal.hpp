@@ -314,6 +314,33 @@ struct cortex_m_cpu
   }
 };
 
+struct instructions_t
+{
+  // Why the length of 8? ARM unwind instructions are capped at 7 bytes for all
+  // possible functions. The 8th instruction will always be the finish byte.
+  // This allows the unwinder to iterate through the whole list without needing
+  // to compare a length variable which would decrease performance.
+  std::array<std::uint8_t, 8> data{
+    arm_ehabi::finish, arm_ehabi::finish, arm_ehabi::finish, arm_ehabi::finish,
+    arm_ehabi::finish, arm_ehabi::finish, arm_ehabi::finish, arm_ehabi::finish,
+  };
+};
+
+/**
+ * @brief Runs one frame's unwind instructions on a CPU state
+ *
+ * Applies the ARM EHABI frame unwinding instructions to `p_cpu`, popping saved
+ * registers from the stack that `p_cpu.sp` points to. On return, `p_cpu.sp` is
+ * the caller's stack pointer and `p_cpu.pc` is the return address.
+ *
+ * Calls `std::terminate()` on a spare or reserved instruction, and on
+ * "refuse to unwind".
+ *
+ * @param p_instructions - the frame's unwind instructions, ending with finish
+ * @param p_cpu - the CPU state of the frame, updated to its caller's state
+ */
+void unwind_frame(instructions_t const& p_instructions, cortex_m_cpu& p_cpu);
+
 enum class runtime_state : std::uint8_t
 {
   handled_state = 0,

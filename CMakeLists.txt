@@ -77,3 +77,49 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND NOT CMAKE_CROSSCOMPILI
   add_test(NAME test_main COMMAND test_main)
   add_test(NAME test_new COMMAND test_new)
 endif()
+
+# unwind_frame() and the rest of the runtime only run on a Cortex-M, so their
+# tests are built when cross compiling for one, and run under QEMU when
+# qemu-system-arm is installed. LIBEXCEPT_QEMU_MACHINE names a QEMU machine
+# with the target's core; conanfile.py sets it from the arch setting.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND CMAKE_CROSSCOMPILING
+   AND DEFINED LIBEXCEPT_QEMU_MACHINE)
+  set(LIBEXCEPT_TEST_LINKER_SCRIPT
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/cortex_m/link.ld)
+
+  add_executable(test_unwind_frame
+    tests/unwind_frame.test.cpp
+    tests/cortex_m/startup.cpp
+  )
+  target_include_directories(test_unwind_frame PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/armv7
+  )
+  target_link_libraries(test_unwind_frame PRIVATE libexcept::libexcept)
+  target_compile_options(test_unwind_frame PRIVATE
+    -g -Werror -Wall -Wextra -Wshadow -fexceptions -fno-rtti
+  )
+  target_link_options(test_unwind_frame PRIVATE
+    -nostartfiles
+    -T${LIBEXCEPT_TEST_LINKER_SCRIPT}
+  )
+  set_target_properties(test_unwind_frame PROPERTIES
+    LINK_DEPENDS ${LIBEXCEPT_TEST_LINKER_SCRIPT}
+  )
+
+  find_program(QEMU_SYSTEM_ARM qemu-system-arm)
+  if(QEMU_SYSTEM_ARM)
+    enable_testing()
+    add_test(NAME test_unwind_frame
+      COMMAND ${QEMU_SYSTEM_ARM} -M ${LIBEXCEPT_QEMU_MACHINE}
+        -display none -monitor none -serial none
+        -semihosting-config enable=on,target=native
+        -kernel $<TARGET_FILE:test_unwind_frame>
+    )
+    # An unwinder bug can loop forever, so a hang fails the test.
+    set_tests_properties(test_unwind_frame PROPERTIES TIMEOUT 30)
+  else()
+    message(STATUS
+      "qemu-system-arm not found: test_unwind_frame is built but not run")
+  endif()
+endif()
