@@ -248,6 +248,33 @@ void pop_under_mask_test()
     expect(test.cpu.lr == 0x0800'2001, "1000iiii: {r14, r15} lr");
     expect(test.cpu.pc == 0x0800'3001, "1000iiii: {r14, r15} pc is not lr");
   }
+  {
+    // Setup
+    frame test(0);
+    test.push({ reinterpret_cast<std::uintptr_t>(&test.stack[50]) });
+
+    // Exercise: 10000010 00000000, pop {r13}, which sets vsp (#14)
+    test.unwind({ 0x82, 0x00 });
+
+    // Verify
+    expect(test.sp_is(50), "1000iiii: {r13} vsp = popped r13");
+  }
+  {
+    // Setup
+    frame test(0);
+    test.push(
+      { 4, reinterpret_cast<std::uintptr_t>(&test.stack[50]), 0x0800'2001 });
+
+    // Exercise: 10000110 00000001, pop {r4, r13, r14}. r14 still comes from
+    // the old vsp, and the popped r13 becomes vsp afterwards (#14).
+    test.unwind({ 0x86, 0x01 });
+
+    // Verify
+    expect(test.cpu.r4 == 4, "1000iiii: {r4, r13, r14} r4");
+    expect(test.cpu.lr == 0x0800'2001, "1000iiii: {r4, r13, r14} lr");
+    expect(test.cpu.pc == 0x0800'2001, "1000iiii: {r4, r13, r14} pc");
+    expect(test.sp_is(50), "1000iiii: {r4, r13, r14} vsp = popped r13");
+  }
 }
 
 void pop_r0_to_r3_test()

@@ -1350,27 +1350,36 @@ void unwind_frame(instructions_t const& p_instructions, cortex_m_cpu& p_cpu)
       move_lr_to_pc = false;
     }
 
-    // TODO(#40): consider (remark b)
-    // ========================================================================
-    // > ‘Pop’ generally denotes removal from the stack commencing at current
-    // > vsp, with subsequent increment of vsp to beyond the removed quantities.
-    // > The sole exception to this rule is popping r13, when the writeback of
-    // > the loaded value to vsp is delayed until after the whole instruction
-    // > has completed. When multiple registers are popped by a single
-    // > instruction they are taken as lowest numbered register at lowest stack
-    // > address.
-    // =========================================================================
+    {
+      // Remark b of the EHABI's frame unwinding instructions (section 10.3):
+      // ======================================================================
+      // > ‘Pop’ generally denotes removal from the stack commencing at current
+      // > vsp, with subsequent increment of vsp to beyond the removed
+      // > quantities. The sole exception to this rule is popping r13, when the
+      // > writeback of the loaded value to vsp is delayed until after the
+      // > whole instruction has completed. When multiple registers are popped
+      // > by a single instruction they are taken as lowest numbered register
+      // > at lowest stack address.
+      // ======================================================================
+      // So r14 and r15 still come from the old vsp, and the popped r13
+      // becomes vsp at the end.
+      bool const pops_sp = (u32_storage & (1U << (13U - 4U))) != 0U;
 
-    while (u32_storage) {
-      // Get the first 1's distance from the right. We add 4 because the
-      // mask's first bit represents r4 and increases from there. The first
-      // byte, the instruction byte, only contains the registers from 12
-      // to 15.
-      std::uint32_t lsb_bit_position = std::countr_zero(u32_storage);
-      // Clear the bit for the lsb_bit_position
-      u32_storage = u32_storage & ~(1 << lsb_bit_position);
-      // Copy value from the stack, increment stack pointer.
-      p_cpu[lsb_bit_position + 4U] = *(sp_ptr++);
+      while (u32_storage) {
+        // Get the first 1's distance from the right. We add 4 because the
+        // mask's first bit represents r4 and increases from there. The first
+        // byte, the instruction byte, only contains the registers from 12
+        // to 15.
+        std::uint32_t lsb_bit_position = std::countr_zero(u32_storage);
+        // Clear the bit for the lsb_bit_position
+        u32_storage = u32_storage & ~(1 << lsb_bit_position);
+        // Copy value from the stack, increment stack pointer.
+        p_cpu[lsb_bit_position + 4U] = *(sp_ptr++);
+      }
+
+      if (pops_sp) {
+        sp_ptr = *p_cpu.sp;
+      }
     }
 
     instruction_ptr++;
