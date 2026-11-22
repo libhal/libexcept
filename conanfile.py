@@ -50,6 +50,35 @@ class except_conan(ConanFile):
     def layout(self):
         cmake_layout(self)
 
+    # Link flags that route the C++ runtime's exception functions to libexcept.
+    # package_info() gives them to consumers, and generate() gives them to the
+    # tests, so the tests link the same way.
+    _wrap_flags = [
+        "-Wl,--wrap=__cxa_throw",
+        "-Wl,--wrap=__cxa_rethrow",
+        "-Wl,--wrap=__cxa_end_catch",
+        "-Wl,--wrap=__cxa_begin_catch",
+        "-Wl,--wrap=__cxa_end_cleanup",
+        "-Wl,--wrap=_Unwind_Resume",
+        # __wrap___cxa_throw() expects an exception from
+        # __wrap___cxa_allocate_exception(), which readies the control
+        # block. Without these, the C++ runtime's allocator runs instead,
+        # and every throw terminates.
+        "-Wl,--wrap=__cxa_allocate_exception",
+        "-Wl,--wrap=__cxa_free_exception",
+        "-Wl,--wrap=__cxa_call_unexpected",
+        # The runtime reads the exception tables itself and never calls a
+        # personality routine. Every table entry still references one, so
+        # without these, the toolchain's personality routines and the
+        # unwinder they call are linked in unused (about 6 kB on a
+        # Cortex-M3). libunwind_wrappers.cpp provides the empty stubs.
+        "-Wl,--wrap=__gxx_personality_v0",
+        "-Wl,--wrap=__gcc_personality_v0",
+        "-Wl,--wrap=__aeabi_unwind_cpp_pr0",
+        "-Wl,--wrap=__aeabi_unwind_cpp_pr1",
+        "-Wl,--wrap=__aeabi_unwind_cpp_pr2",
+    ]
+
     @property
     def _qemu_machine(self):
         # A QEMU machine with the target's core, for the tests that run under
@@ -70,6 +99,8 @@ class except_conan(ConanFile):
         if self._qemu_machine:
             toolchain.cache_variables["LIBEXCEPT_QEMU_MACHINE"] = (
                 self._qemu_machine)
+        toolchain.cache_variables["LIBEXCEPT_WRAP_FLAGS"] = ";".join(
+            self._wrap_flags)
         toolchain.generate()
 
     def build_requirements(self):
@@ -83,8 +114,9 @@ class except_conan(ConanFile):
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
-        # Runs the tests under QEMU when cross compiling for a Cortex-M with
-        # qemu-system-arm installed. Skipped with tools.build:skip_test.
+        # Runs the Cortex-M tests through CMAKE_CROSSCOMPILING_EMULATOR, QEMU
+        # by default when qemu-system-arm is installed. Skipped with
+        # tools.build:skip_test.
         cmake.ctest(["--output-on-failure"])
 
     def package(self):
@@ -114,30 +146,8 @@ class except_conan(ConanFile):
         self.cpp_info.exelinkflags.extend([
             "-fexceptions",
             "-L" + str(Path(self.package_folder) / "linker_scripts"),
-            "-Wl,--wrap=__cxa_throw",
-            "-Wl,--wrap=__cxa_rethrow",
-            "-Wl,--wrap=__cxa_end_catch",
-            "-Wl,--wrap=__cxa_begin_catch",
-            "-Wl,--wrap=__cxa_end_cleanup",
-            "-Wl,--wrap=_Unwind_Resume",
-            # __wrap___cxa_throw() expects an exception from
-            # __wrap___cxa_allocate_exception(), which readies the control
-            # block. Without these, the C++ runtime's allocator runs instead,
-            # and every throw terminates.
-            "-Wl,--wrap=__cxa_allocate_exception",
-            "-Wl,--wrap=__cxa_free_exception",
-            "-Wl,--wrap=__cxa_call_unexpected",
-            # The runtime reads the exception tables itself and never calls a
-            # personality routine. Every table entry still references one, so
-            # without these, the toolchain's personality routines and the
-            # unwinder they call are linked in unused (about 6 kB on a
-            # Cortex-M3). libunwind_wrappers.cpp provides the empty stubs.
-            "-Wl,--wrap=__gxx_personality_v0",
-            "-Wl,--wrap=__gcc_personality_v0",
-            "-Wl,--wrap=__aeabi_unwind_cpp_pr0",
-            "-Wl,--wrap=__aeabi_unwind_cpp_pr1",
-            "-Wl,--wrap=__aeabi_unwind_cpp_pr2",
         ])
+        self.cpp_info.exelinkflags.extend(self._wrap_flags)
 
         # CMakeLists.txt builds libexcept as an OBJECT library and installs
         # the loose .o files (no .a, no CMake package config of our own -
