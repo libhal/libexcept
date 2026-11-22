@@ -2098,10 +2098,16 @@ void raise_exception(exception_control_block& p_exception_object)
       }
       case runtime_state::get_next_frame: {
         auto const& index_entry = [&p_exception_object]() -> decltype(auto) {
+          // pc is a return address, which follows the call. When a function
+          // ends with a call that never returns, such as a call to
+          // __cxa_throw(), the return address is the start of the next
+          // function. Subtracting 2 puts it inside the call instruction, as
+          // libgcc's get_eit_entry() does.
+          auto const call_address = p_exception_object.cpu.pc - 2U;
           if (__except_abi::normal_table.empty()) {
-            return get_index_entry(p_exception_object.cpu.pc);
+            return get_index_entry(call_address);
           } else {
-            return get_index_entry_near_point(p_exception_object.cpu.pc);
+            return get_index_entry_near_point(call_address);
           }
         }();
 
