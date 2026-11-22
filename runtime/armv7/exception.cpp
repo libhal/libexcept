@@ -666,7 +666,7 @@ public:
     auto const* type_table = as<std::uintptr_t const*>(m_type_table_end);
 
     // We assume prel here because all other options are deprecated
-    // TODO(#39): Consider using the type table encoding format for decoding
+    // TODO(#15): Consider using the type table encoding format for decoding
     // the type table info rather than assuming that the values here are
     // prel31_offsets
     auto const* current_type = &type_table[-m_filter];
@@ -1118,13 +1118,14 @@ void unwind_frame(instructions_t const& p_instructions, cortex_m_cpu& p_cpu)
     &&reserved_or_spare_thus_terminate,  // 10110011 [179]
 #endif
 
-    // Pop Return Address Authentication Code pseudo-register
-    // TODO(#28): Add support for this
-    &&reserved_or_spare_thus_terminate,  // 10110100 [180]
+    // Pop Return Address Authentication Code pseudo-register. The code is one
+    // word, and the runtime doesn't authenticate return addresses, so this
+    // skips the word, the same as `vsp = vsp + 4`.
+    &&vsp_add_0,  // 10110100 [180]
 
-    // Use current vsp as modifier in Return Address Authentication
-    // TODO(#29): Add support for this
-    &&reserved_or_spare_thus_terminate,  // 10110101 [181]
+    // Use current vsp as modifier in Return Address Authentication. The
+    // runtime doesn't authenticate return addresses, so nothing to do.
+    &&use_vsp_as_authentication_modifier,  // 10110101 [181]
 
     // Spare (was Pop FPA) 1011011n
     &&reserved_or_spare_thus_terminate,  // 10110110 [182]
@@ -1293,6 +1294,9 @@ void unwind_frame(instructions_t const& p_instructions, cortex_m_cpu& p_cpu)
   reserved_or_spare_thus_terminate:
     std::terminate();
     break;
+
+  use_vsp_as_authentication_modifier:
+    continue;
 
   subtract_vsp_using_uleb128:
     static constexpr auto uleb128_offset = 0x204 / sizeof(std::uint32_t);

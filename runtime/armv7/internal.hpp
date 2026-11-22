@@ -27,7 +27,7 @@ namespace except {
 using exception_ptr = void*;
 using destructor_t = void(void*);
 
-// TODO(#102): use uintptr and intptr instead of exact word length types.
+// TODO(#6): use uintptr and intptr instead of exact word length types.
 struct register_t
 {
   std::uintptr_t data;
