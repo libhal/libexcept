@@ -317,6 +317,50 @@ void vsp_add_uleb128_test()
   }
 }
 
+void return_address_authentication_test()
+{
+  {
+    // Setup
+    frame test(0);
+    test.push({ 0xAAAA'5555 });
+
+    // Exercise: 10110100, pop the return address authentication code
+    test.unwind({ 0xB4 });
+
+    // Verify
+    expect(test.sp_is(1), "10110100: vsp skips the code");
+    expect(test.cpu.pc == frame::return_address, "10110100: pc = lr");
+  }
+  {
+    // Setup
+    frame test(3);
+
+    // Exercise: 10110101, use vsp as the authentication modifier
+    test.unwind({ 0xB5 });
+
+    // Verify
+    expect(test.sp_is(3), "10110101: vsp is unchanged");
+    expect(test.cpu.pc == frame::return_address, "10110101: pc = lr");
+  }
+  {
+    // Setup: what GCC 14.3 emits with -mbranch-protection=pac-ret for a
+    // Cortex-M85 function that signs lr into ip, pushes {r4, ip, lr}, and
+    // allocates 36 bytes below them.
+    frame test(0);
+    test.stack[9] = 4;
+    test.stack[10] = 0xAAAA'5555;
+    test.stack[11] = 0x0800'2001;
+
+    // Exercise: vsp = vsp + 36; pop {r4}; pop the code; pop {r14}
+    test.unwind({ 0x08, 0xA0, 0xB4, 0x84, 0x00 });
+
+    // Verify
+    expect(test.cpu.r4 == 4, "pac-ret: r4");
+    expect(test.cpu.pc == 0x0800'2001, "pac-ret: pc");
+    expect(test.sp_is(12), "pac-ret: vsp");
+  }
+}
+
 void frame_pointer_sequence_test()
 {
   // Setup: what Clang 23 emits with -fno-omit-frame-pointer for a function
@@ -405,6 +449,7 @@ int main()
   pop_under_mask_test();
   pop_r0_to_r3_test();
   vsp_add_uleb128_test();
+  return_address_authentication_test();
   frame_pointer_sequence_test();
 #if defined(__ARM_FP)
   pop_vfp_test();
