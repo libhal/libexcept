@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from conan import ConanFile
-from conan.tools.cmake import CMake, cmake_layout
+from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
 from conan.tools.files import copy
 from conan.tools.build import check_min_cppstd
 from pathlib import Path
@@ -30,7 +30,7 @@ class except_conan(ConanFile):
         "Exception handling runtime support for the libhal ecosystem.")
     topics = ("exceptions", "error", "terminate", "unexpected")
     settings = "compiler", "build_type", "os", "arch"
-    generators = "CMakeDeps", "CMakeToolchain", "VirtualBuildEnv"
+    generators = "CMakeDeps", "VirtualBuildEnv"
     exports_sources = ("include/*", "tests/*", "LICENSE",
                        "CMakeLists.txt", "runtime/*", "nearpoint/*",
                        "linker_scripts/*")
@@ -50,6 +50,28 @@ class except_conan(ConanFile):
     def layout(self):
         cmake_layout(self)
 
+    @property
+    def _qemu_machine(self):
+        # A QEMU machine with the target's core, for the tests that run under
+        # QEMU. netduino2 is an STM32F205 (Cortex-M3), which also runs
+        # Cortex-M0 and M0+ code. netduinoplus2 is an STM32F405 (Cortex-M4F).
+        machines = {
+            "cortex-m0": "netduino2",
+            "cortex-m0plus": "netduino2",
+            "cortex-m1": "netduino2",
+            "cortex-m3": "netduino2",
+            "cortex-m4": "netduinoplus2",
+            "cortex-m4f": "netduinoplus2",
+        }
+        return machines.get(str(self.settings.arch))
+
+    def generate(self):
+        toolchain = CMakeToolchain(self)
+        if self._qemu_machine:
+            toolchain.cache_variables["LIBEXCEPT_QEMU_MACHINE"] = (
+                self._qemu_machine)
+        toolchain.generate()
+
     def build_requirements(self):
         self.tool_requires("cmake/[>=3.38.0 <5.0.0]")
         self.test_requires("boost-ext-ut/2.1.0")
@@ -61,6 +83,9 @@ class except_conan(ConanFile):
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
+        # Runs the tests under QEMU when cross compiling for a Cortex-M with
+        # qemu-system-arm installed. Skipped with tools.build:skip_test.
+        cmake.ctest(["--output-on-failure"])
 
     def package(self):
         copy(self,
