@@ -82,8 +82,8 @@ endif()
 # tests are built when cross compiling for one. ctest runs each test program
 # through CMAKE_CROSSCOMPILING_EMULATOR. When none is given, and
 # qemu-system-arm is installed, QEMU runs them on LIBEXCEPT_QEMU_MACHINE, a
-# QEMU machine with the target's core. LIBEXCEPT_WRAP_FLAGS holds the --wrap
-# link flags that consumers of the package get. conanfile.py sets both.
+# QEMU machine with the target's core. LIBEXCEPT_LINK_FLAGS holds the link
+# flags that consumers of the package get. conanfile.py sets both.
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND CMAKE_CROSSCOMPILING
    AND (DEFINED LIBEXCEPT_QEMU_MACHINE OR CMAKE_CROSSCOMPILING_EMULATOR))
   set(LIBEXCEPT_TEST_LINKER_SCRIPT
@@ -110,9 +110,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND CMAKE_CROSSCOMPILING
   endif()
 
   # What every Cortex-M test program links against: the startup code, the
-  # linker script, the runtime, and the --wrap link flags. An OBJECT library,
-  # so startup.cpp is always linked: nothing calls its reset handler or vector
-  # table, so a static library would leave them out.
+  # linker script, the runtime, and the consumers' link flags. An OBJECT
+  # library, so startup.cpp is always linked: nothing calls its reset handler
+  # or vector table, so a static library would leave them out.
   add_library(cortex_m_test_support OBJECT tests/cortex_m/startup.cpp)
   target_include_directories(cortex_m_test_support PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -130,7 +130,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND CMAKE_CROSSCOMPILING
   target_link_options(cortex_m_test_support INTERFACE
     -nostartfiles
     -T${LIBEXCEPT_TEST_LINKER_SCRIPT}
-    ${LIBEXCEPT_WRAP_FLAGS}
+    ${LIBEXCEPT_LINK_FLAGS}
   )
   set_target_properties(cortex_m_test_support PROPERTIES
     INTERFACE_LINK_DEPENDS ${LIBEXCEPT_TEST_LINKER_SCRIPT}
@@ -139,6 +139,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND CMAKE_CROSSCOMPILING
   add_executable(test_unwind_frame tests/unwind_frame.test.cpp)
   target_link_libraries(test_unwind_frame PRIVATE cortex_m_test_support)
   add_test(NAME test_unwind_frame COMMAND test_unwind_frame)
+
+  add_executable(test_type_table tests/type_table.test.cpp)
+  target_link_libraries(test_type_table PRIVATE cortex_m_test_support)
+  add_test(NAME test_type_table COMMAND test_type_table)
 
   add_executable(test_throw tests/throw.test.cpp tests/throw_frames.cpp)
   target_link_libraries(test_throw PRIVATE cortex_m_test_support)

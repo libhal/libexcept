@@ -649,13 +649,6 @@ public:
   {
   }
 
-  static std::type_info const* to_type_info(void const* p_type_info_address)
-  {
-    // NOLINTNEXTLINE(performance-no-int-to-ptr)
-    return reinterpret_cast<std::type_info const*>(
-      to_absolute_address(p_type_info_address));
-  }
-
   static std::type_info const* catch_all()
   {
     return reinterpret_cast<std::type_info const*>(0xFFFF'FFFF);
@@ -665,20 +658,21 @@ public:
   {
     auto const* type_table = as<std::uintptr_t const*>(m_type_table_end);
 
-    // We assume prel here because all other options are deprecated
-    // TODO(#15): Consider using the type table encoding format for decoding
-    // the type table info rather than assuming that the values here are
-    // prel31_offsets
+    // Each entry is pc-relative, whatever the LSDA's type table encoding
+    // says. Compilers emit the entries as R_ARM_TARGET2 relocations, and the
+    // linker picks their form, so the encoding byte doesn't describe them:
+    // GCC writes 0x10 (pcrel) and Clang writes 0x00 (absptr) for the same
+    // entries. libexcept's link flags pass --target2=rel to the linker, which
+    // makes them pc-relative.
     auto const* current_type = &type_table[-m_filter];
 
     if (*current_type == nullptr) {
       return catch_all();
     }
 
-    auto const* test =
-      to_absolute_address_ptr(static_cast<void const*>(current_type));
-
-    return reinterpret_cast<std::type_info const*>(test);
+    // NOLINTNEXTLINE(performance-no-int-to-ptr)
+    return reinterpret_cast<std::type_info const*>(
+      type_table_entry_address(current_type));
   }
 
   [[nodiscard]] std::type_info const* get_next_catch_type()

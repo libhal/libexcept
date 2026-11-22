@@ -84,6 +84,24 @@ constexpr std::uint32_t* to_absolute_address_ptr(void const* p_object)
   return std::bit_cast<std::uint32_t*>(to_absolute_address(p_object));
 }
 
+/**
+ * @brief Find the address that a type table entry points to
+ *
+ * libexcept's link flags pass --target2=rel, which makes each entry a full
+ * 32-bit offset from the entry itself (R_ARM_REL32). That is unlike the
+ * index table's 31-bit offsets, which `to_absolute_address()` decodes: here
+ * bit 30 is not a sign bit.
+ *
+ * @param p_entry - the type table entry
+ * @return std::uintptr_t - the address of the entry's `std::type_info`
+ */
+inline std::uintptr_t type_table_entry_address(void const* p_entry)
+{
+  auto const offset = *std::bit_cast<std::int32_t const*>(p_entry);
+  return std::bit_cast<std::uintptr_t>(p_entry) +
+         static_cast<std::uintptr_t>(offset);
+}
+
 /// Byte positions of the unwind instructions in an entry whose header holds
 /// three of them: compact personality routine 0, and the generic model.
 namespace su16 {
