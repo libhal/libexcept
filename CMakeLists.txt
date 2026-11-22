@@ -79,47 +79,72 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND NOT CMAKE_CROSSCOMPILI
 endif()
 
 # unwind_frame() and the rest of the runtime only run on a Cortex-M, so their
-# tests are built when cross compiling for one, and run under QEMU when
-# qemu-system-arm is installed. LIBEXCEPT_QEMU_MACHINE names a QEMU machine
-# with the target's core; conanfile.py sets it from the arch setting.
+# tests are built when cross compiling for one. ctest runs each test program
+# through CMAKE_CROSSCOMPILING_EMULATOR. When none is given, and
+# qemu-system-arm is installed, QEMU runs them on LIBEXCEPT_QEMU_MACHINE, a
+# QEMU machine with the target's core. LIBEXCEPT_WRAP_FLAGS holds the --wrap
+# link flags that consumers of the package get. conanfile.py sets both.
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND CMAKE_CROSSCOMPILING
-   AND DEFINED LIBEXCEPT_QEMU_MACHINE)
+   AND (DEFINED LIBEXCEPT_QEMU_MACHINE OR CMAKE_CROSSCOMPILING_EMULATOR))
   set(LIBEXCEPT_TEST_LINKER_SCRIPT
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/cortex_m/link.ld)
 
-  add_executable(test_unwind_frame
-    tests/unwind_frame.test.cpp
-    tests/cortex_m/startup.cpp
-  )
-  target_include_directories(test_unwind_frame PRIVATE
+  if(NOT CMAKE_CROSSCOMPILING_EMULATOR AND DEFINED LIBEXCEPT_QEMU_MACHINE)
+    find_program(QEMU_SYSTEM_ARM qemu-system-arm)
+    if(QEMU_SYSTEM_ARM)
+      # Output and the exit code go through semihosting. CMake appends the
+      # test program's path, so the list ends with -kernel.
+      set(CMAKE_CROSSCOMPILING_EMULATOR
+        ${QEMU_SYSTEM_ARM} -M ${LIBEXCEPT_QEMU_MACHINE}
+        -display none -monitor none -serial none
+        -semihosting-config enable=on,target=native
+        -kernel
+      )
+    endif()
+  endif()
+  if(CMAKE_CROSSCOMPILING_EMULATOR)
+    enable_testing()
+  else()
+    message(STATUS
+      "qemu-system-arm not found: the Cortex-M tests are built but not run")
+  endif()
+
+  # What every Cortex-M test program links against: the startup code, the
+  # linker script, the runtime, and the --wrap link flags. An OBJECT library,
+  # so startup.cpp is always linked: nothing calls its reset handler or vector
+  # table, so a static library would leave them out.
+  add_library(cortex_m_test_support OBJECT tests/cortex_m/startup.cpp)
+  target_include_directories(cortex_m_test_support PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime/armv7
   )
-  target_link_libraries(test_unwind_frame PRIVATE libexcept::libexcept)
-  target_compile_options(test_unwind_frame PRIVATE
+  target_compile_options(cortex_m_test_support PUBLIC
     -g -Werror -Wall -Wextra -Wshadow -fexceptions -fno-rtti
   )
-  target_link_options(test_unwind_frame PRIVATE
+  # An OBJECT library's objects only go into targets that link it directly,
+  # so the runtime's objects are passed on explicitly.
+  target_link_libraries(cortex_m_test_support
+    PUBLIC libexcept::libexcept
+    INTERFACE $<TARGET_OBJECTS:libexcept>
+  )
+  target_link_options(cortex_m_test_support INTERFACE
     -nostartfiles
     -T${LIBEXCEPT_TEST_LINKER_SCRIPT}
+    ${LIBEXCEPT_WRAP_FLAGS}
   )
-  set_target_properties(test_unwind_frame PROPERTIES
-    LINK_DEPENDS ${LIBEXCEPT_TEST_LINKER_SCRIPT}
+  set_target_properties(cortex_m_test_support PROPERTIES
+    INTERFACE_LINK_DEPENDS ${LIBEXCEPT_TEST_LINKER_SCRIPT}
   )
 
-  find_program(QEMU_SYSTEM_ARM qemu-system-arm)
-  if(QEMU_SYSTEM_ARM)
-    enable_testing()
-    add_test(NAME test_unwind_frame
-      COMMAND ${QEMU_SYSTEM_ARM} -M ${LIBEXCEPT_QEMU_MACHINE}
-        -display none -monitor none -serial none
-        -semihosting-config enable=on,target=native
-        -kernel $<TARGET_FILE:test_unwind_frame>
-    )
-    # An unwinder bug can loop forever, so a hang fails the test.
-    set_tests_properties(test_unwind_frame PROPERTIES TIMEOUT 30)
-  else()
-    message(STATUS
-      "qemu-system-arm not found: test_unwind_frame is built but not run")
-  endif()
+  add_executable(test_unwind_frame tests/unwind_frame.test.cpp)
+  target_link_libraries(test_unwind_frame PRIVATE cortex_m_test_support)
+  add_test(NAME test_unwind_frame COMMAND test_unwind_frame)
+
+  add_executable(test_throw tests/throw.test.cpp tests/throw_frames.cpp)
+  target_link_libraries(test_throw PRIVATE cortex_m_test_support)
+  add_test(NAME test_throw COMMAND test_throw)
+
+  # An unwinder bug can loop forever, so a hang fails the test.
+  get_property(LIBEXCEPT_CORTEX_M_TESTS DIRECTORY PROPERTY TESTS)
+  set_tests_properties(${LIBEXCEPT_CORTEX_M_TESTS} PROPERTIES TIMEOUT 30)
 endif()
