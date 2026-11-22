@@ -2145,29 +2145,41 @@ void raise_exception(exception_control_block& p_exception_object)
   }
 }
 
-template<typename F>
-instructions_t cache(F* p_function_to_be_cached)
+// Not a template, so the decoder is built once for both cached functions.
+[[gnu::noinline]] instructions_t cache_address(
+  std::uintptr_t p_function_address)
 {
   except::control_block.cache.state(runtime_state::handled_state);
 
-  auto const function_address =
-    reinterpret_cast<std::uintptr_t>(p_function_to_be_cached);
-
-  auto const& entry = except::get_index_entry(function_address);
-  if (entry.has_inlined_personality()) {
-    return personality_to_unwind_instructions(&entry.personality_offset);
-  } else {
-    // Set unwind information for this cached item to SPARE (the one right
-    // after FINISH in the ARM EH-ABI), which will call terminate. Because
-    // this cache call will occur at static initialization, we cannot throw
-    // and hope to be caught by anything. Nor can we terminate as the
-    // application hasn't provided a terminate handler. We could busy loop
-    // here as well and I'm not opposed to that. But for now, we'll just
-    // terminate when either of our cached functions isn't re-entrant. In
-    // general, we must make sure that our cached functions are re-entrant to
-    // reduce on cycles.
+  auto const& entry = except::get_index_entry(p_function_address);
+  if (entry.is_noexcept()) {
+    // EXIDX_CANTUNWIND: the function has no unwind instructions. Cache the
+    // spare instruction (the one right after FINISH in the ARM EH-ABI), so a
+    // throw terminates. This runs during static initialization, where we
+    // can't throw, and the application hasn't installed a terminate handler
+    // yet, so terminating here isn't an option either.
     return spare_instruction();
   }
+
+  // Short entries are inlined in the index table. Longer ones, such as GCC's
+  // at -O0 or with a frame pointer, are in the exception table: a compact
+  // model entry starts with its instructions, and a generic model entry
+  // starts with the personality routine's address.
+  std::uint32_t const* handler_data = &entry.personality_offset;
+  if (not entry.has_inlined_personality()) {
+    handler_data = entry.personality();
+    if (not is_compact_model(*handler_data)) {
+      handler_data++;
+    }
+  }
+  return personality_to_unwind_instructions(handler_data);
+}
+
+template<typename F>
+instructions_t cache(F* p_function_to_be_cached)
+{
+  return cache_address(
+    reinterpret_cast<std::uintptr_t>(p_function_to_be_cached));
 }
 
 auto const cxa_throw_unwind_instructions = cache(&__wrap___cxa_throw);
