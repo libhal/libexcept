@@ -144,6 +144,49 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND CMAKE_CROSSCOMPILING
   target_link_libraries(test_throw PRIVATE cortex_m_test_support)
   add_test(NAME test_throw COMMAND test_throw)
 
+  # A GCC build can link objects that Clang compiled, and Clang emits unwind
+  # instructions that GCC doesn't. test_throw_clang_frames builds
+  # tests/throw_frames.cpp with Clang and links it into the GCC build of the
+  # throw test. LIBEXCEPT_TEST_CLANG is the clang++ to use, found on PATH by
+  # default. The target flags come from CMAKE_CXX_FLAGS, and -fshort-enums
+  # matches GCC's enum size for arm-none-eabi.
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    find_program(LIBEXCEPT_TEST_CLANG NAMES clang++ clang)
+    string(REGEX MATCHALL "-m(cpu|fpu|float-abi)=[^ ]+"
+      LIBEXCEPT_TEST_TARGET_FLAGS "${CMAKE_CXX_FLAGS}")
+    if(NOT LIBEXCEPT_TEST_CLANG)
+      message(STATUS "Clang not found: test_throw_clang_frames is not built")
+    elseif(NOT LIBEXCEPT_TEST_TARGET_FLAGS MATCHES "-mcpu=")
+      message(STATUS
+        "No -mcpu in CMAKE_CXX_FLAGS: test_throw_clang_frames is not built")
+    else()
+      set(LIBEXCEPT_CLANG_FRAMES
+          ${CMAKE_CURRENT_BINARY_DIR}/throw_frames.clang.o)
+      add_custom_command(
+        OUTPUT ${LIBEXCEPT_CLANG_FRAMES}
+        COMMAND ${LIBEXCEPT_TEST_CLANG} --target=arm-none-eabi -mthumb
+          ${LIBEXCEPT_TEST_TARGET_FLAGS} -fshort-enums
+          -std=c++23 -Os -g -fexceptions -fno-rtti -nostdinc
+          -Werror -Wall -Wextra -Wshadow
+          -c ${CMAKE_CURRENT_SOURCE_DIR}/tests/throw_frames.cpp
+          -o ${LIBEXCEPT_CLANG_FRAMES}
+        DEPENDS
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/throw_frames.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/throw_frames.hpp
+        COMMENT "Building tests/throw_frames.cpp with Clang"
+        VERBATIM
+      )
+      add_executable(test_throw_clang_frames
+        tests/throw.test.cpp
+        ${LIBEXCEPT_CLANG_FRAMES}
+      )
+      target_link_libraries(test_throw_clang_frames PRIVATE
+        cortex_m_test_support
+      )
+      add_test(NAME test_throw_clang_frames COMMAND test_throw_clang_frames)
+    endif()
+  endif()
+
   # An unwinder bug can loop forever, so a hang fails the test.
   get_property(LIBEXCEPT_CORTEX_M_TESTS DIRECTORY PROPERTY TESTS)
   set_tests_properties(${LIBEXCEPT_CORTEX_M_TESTS} PROPERTIES TIMEOUT 30)
