@@ -1356,7 +1356,9 @@ void unwind_frame(instructions_t const& p_instructions, cortex_m_cpu& p_cpu)
     u32_storage <<= 8;
     u32_storage |= *(instruction_ptr);
 
-    if (u32_storage & (1 << 3)) {
+    // Bit 0 of the mask is r4, so r15 is bit 11. When r15 is popped, the
+    // popped value is the return address, and `lr` must not replace it.
+    if ((u32_storage & (1U << (15U - 4U))) != 0U) {
       move_lr_to_pc = false;
     }
 
@@ -1372,7 +1374,7 @@ void unwind_frame(instructions_t const& p_instructions, cortex_m_cpu& p_cpu)
     // =========================================================================
 
     while (u32_storage) {
-      // Get the first 1's distance from the right. We add 12 because the
+      // Get the first 1's distance from the right. We add 4 because the
       // mask's first bit represents r4 and increases from there. The first
       // byte, the instruction byte, only contains the registers from 12
       // to 15.
