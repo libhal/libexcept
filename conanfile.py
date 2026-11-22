@@ -50,10 +50,17 @@ class except_conan(ConanFile):
     def layout(self):
         cmake_layout(self)
 
-    # Link flags that route the C++ runtime's exception functions to libexcept.
-    # package_info() gives them to consumers, and generate() gives them to the
-    # tests, so the tests link the same way.
-    _wrap_flags = [
+    # Link flags that every program using libexcept needs. package_info() gives
+    # them to consumers, and generate() gives them to the tests, so the tests
+    # link the same way.
+    _link_flags = [
+        # Type table entries are R_ARM_TARGET2 relocations, and the runtime
+        # reads them as pc-relative. That is the default for GNU ld on
+        # arm-none-eabi and for ld.lld run by clang, but ld.lld on its own
+        # defaults to got-rel, and then no typed catch ever matches. See
+        # get_current_type_info_from_filter() in runtime/armv7/exception.cpp.
+        "-Wl,--target2=rel",
+        # Route the C++ runtime's exception functions to libexcept.
         "-Wl,--wrap=__cxa_throw",
         "-Wl,--wrap=__cxa_rethrow",
         "-Wl,--wrap=__cxa_end_catch",
@@ -99,8 +106,8 @@ class except_conan(ConanFile):
         if self._qemu_machine:
             toolchain.cache_variables["LIBEXCEPT_QEMU_MACHINE"] = (
                 self._qemu_machine)
-        toolchain.cache_variables["LIBEXCEPT_WRAP_FLAGS"] = ";".join(
-            self._wrap_flags)
+        toolchain.cache_variables["LIBEXCEPT_LINK_FLAGS"] = ";".join(
+            self._link_flags)
         toolchain.generate()
 
     def build_requirements(self):
@@ -147,7 +154,7 @@ class except_conan(ConanFile):
             "-fexceptions",
             "-L" + str(Path(self.package_folder) / "linker_scripts"),
         ])
-        self.cpp_info.exelinkflags.extend(self._wrap_flags)
+        self.cpp_info.exelinkflags.extend(self._link_flags)
 
         # CMakeLists.txt builds libexcept as an OBJECT library and installs
         # the loose .o files (no .a, no CMake package config of our own -
